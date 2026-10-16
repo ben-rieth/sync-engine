@@ -4,3 +4,5 @@ export {
   ClockDriftError,
   type HybridLogicalClockOptions,
 } from "./core/hlc/clock";
+
+export type { StorageAdapter, StorageTx } from "./core/storage";

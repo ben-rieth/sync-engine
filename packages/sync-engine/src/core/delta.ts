@@ -13,8 +13,11 @@ export type DeltaKey = string & { readonly __brand: "DeltaKey" }; // JSON of [ta
 
 const isDeltaKey = (key: string): key is DeltaKey => key.startsWith("[");
 
-export const getDeltaKey = (delta: SetDelta): DeltaKey => {
-  const key = JSON.stringify([delta.table, delta.objectId, delta.column]);
+/** Identifies a single cell: one column of one object in one table. A `SetDelta` is a valid `CellRef`. */
+export type CellRef = { table: string; objectId: string; column: string };
+
+export const deltaKey = (cell: CellRef): DeltaKey => {
+  const key = JSON.stringify([cell.table, cell.objectId, cell.column]);
   if (!isDeltaKey(key)) throw new Error("unreachable: JSON array encoding");
   return key;
 };

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { getDeltaKey, type Delta, type DeltaKey, type SetDelta } from "#core/delta";
+import { deltaKey, type Delta, type DeltaKey, type SetDelta } from "#core/delta";
 import { HLCTimestamp } from "#core/hlc/timestamp";
 import { planMerge } from "#core/merge";
-import { getObjectKey, type ObjectKey } from "#core/object";
+import { objectKey, type ObjectKey } from "#core/object";
 
 const TABLE = "todos";
 const OBJECT = "obj-1";
@@ -63,7 +63,7 @@ describe("planMerge", () => {
 
     it("skips the write when the local cell is newer, but still records history", () => {
       const incoming = delta(t(1), "title", "stale");
-      const latest = new Map<DeltaKey, string>([[getDeltaKey(incoming), t(5)]]);
+      const latest = new Map<DeltaKey, string>([[deltaKey(incoming), t(5)]]);
 
       const result = plan({ incoming: [incoming], latest });
 
@@ -73,14 +73,14 @@ describe("planMerge", () => {
 
     it("skips the write when the local cell has the same timestamp", () => {
       const incoming = delta(t(3), "title", "same");
-      const latest = new Map<DeltaKey, string>([[getDeltaKey(incoming), t(3)]]);
+      const latest = new Map<DeltaKey, string>([[deltaKey(incoming), t(3)]]);
 
       expect(plan({ incoming: [incoming], latest }).writes).toEqual([]);
     });
 
     it("writes when the incoming delta is newer than the local cell", () => {
       const incoming = delta(t(5), "title", "fresh");
-      const latest = new Map<DeltaKey, string>([[getDeltaKey(incoming), t(1)]]);
+      const latest = new Map<DeltaKey, string>([[deltaKey(incoming), t(1)]]);
 
       expect(plan({ incoming: [incoming], latest }).writes).toEqual([
         { kind: "patch", table: TABLE, objectId: OBJECT, patch: { title: "fresh" } },
@@ -114,7 +114,7 @@ describe("planMerge", () => {
 
       const result = plan({
         incoming: [patch],
-        deleted: new Set([getObjectKey({ table: TABLE, objectId: OBJECT })]),
+        deleted: new Set([objectKey({ table: TABLE, objectId: OBJECT })]),
       });
 
       expect(result.writes).toEqual([]);
@@ -126,7 +126,7 @@ describe("planMerge", () => {
 
       const result = plan({
         incoming: [del],
-        deleted: new Set([getObjectKey({ table: TABLE, objectId: OBJECT })]),
+        deleted: new Set([objectKey({ table: TABLE, objectId: OBJECT })]),
       });
 
       expect(result.writes).toEqual([]);
@@ -164,7 +164,7 @@ describe("planMerge", () => {
 
       const result = plan({
         incoming: [patch],
-        deleted: new Set([getObjectKey({ table: "todos", objectId: OBJECT })]),
+        deleted: new Set([objectKey({ table: "todos", objectId: OBJECT })]),
       });
 
       expect(result.writes).toEqual([
@@ -246,9 +246,9 @@ describe("planMerge", () => {
       delta(t(1), "title", "a"),
     ];
     const latest = new Map<DeltaKey, string>([
-      [getDeltaKey(delta(t(0), "title", null, { objectId: "obj-3" })), t(0)],
+      [deltaKey(delta(t(0), "title", null, { objectId: "obj-3" })), t(0)],
     ]);
-    const deleted = new Set<ObjectKey>([getObjectKey({ table: TABLE, objectId: "obj-4" })]);
+    const deleted = new Set<ObjectKey>([objectKey({ table: TABLE, objectId: "obj-4" })]);
     const knownTimestamps = new Set([t(9)]);
 
     const snapshot = {
@@ -311,7 +311,7 @@ describe("planMerge convergence", () => {
     const latest = new Map<DeltaKey, string>();
     for (const d of replica.history) {
       if (d.kind !== "set") continue;
-      const key = getDeltaKey(d);
+      const key = deltaKey(d);
       const current = latest.get(key);
       if (current === undefined || current < d.timestamp) latest.set(key, d.timestamp);
     }
@@ -324,7 +324,7 @@ describe("planMerge convergence", () => {
     });
 
     for (const write of result.writes) {
-      const key = getObjectKey(write);
+      const key = objectKey(write);
       if (write.kind === "delete") {
         replica.rows.delete(key);
         replica.deleted.add(key);
@@ -375,7 +375,7 @@ describe("planMerge convergence", () => {
       { table: TABLE, objectId: OBJECT, values: { title: "b", done: true } },
       { table: TABLE, objectId: "obj-3", values: { title: "x" } },
     ],
-    deleted: [getObjectKey({ table: TABLE, objectId: "obj-2" })],
+    deleted: [objectKey({ table: TABLE, objectId: "obj-2" })],
   };
 
   for (const [orderName, order] of Object.entries(orders)) {

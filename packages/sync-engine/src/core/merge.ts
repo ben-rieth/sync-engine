@@ -1,5 +1,5 @@
-import { getDeltaKey, type Delta, type DeltaKey } from "./delta";
-import { getObjectKey, type ObjectKey } from "./object";
+import { deltaKey, type Delta, type DeltaKey } from "./delta";
+import { objectKey, type ObjectKey } from "./object";
 
 type RowWrite =
   | { kind: "patch"; table: string; objectId: string; patch: Record<string, unknown> }
@@ -50,7 +50,7 @@ export const planMerge = (input: MergeInput): MergePlan => {
     seen.add(delta.timestamp);
     historyAdds.push(delta);
 
-    const object = getObjectKey(delta);
+    const object = objectKey(delta);
 
     if (deletedObjects.has(object)) {
       continue;
@@ -62,7 +62,7 @@ export const planMerge = (input: MergeInput): MergePlan => {
       continue;
     }
 
-    const cell = getDeltaKey(delta);
+    const cell = deltaKey(delta);
     const current = cellLatest.get(cell);
 
     if (current !== undefined && current >= delta.timestamp) {
