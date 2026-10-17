@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { deltaKey, type CellRef, type DeleteDelta, type SetDelta } from "#core/delta";
-import { HLCTimestamp } from "#core/hlc/timestamp";
-import { objectKey } from "#core/object";
-import type { StorageAdapter, StorageTx } from "#core/storage";
+import {
+  deltaKey,
+  HLCTimestamp,
+  objectKey,
+  type CellRef,
+  type DeleteDelta,
+  type SetDelta,
+  type StorageAdapter,
+  type StorageTx,
+} from "@sync-engine/core";
 
 export type StorageConformanceOptions = {
   /** Return a fresh, empty adapter. Called before every test. */
