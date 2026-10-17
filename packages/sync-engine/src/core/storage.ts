@@ -87,6 +87,9 @@ export type StorageTx = {
   };
 };
 
+/** `read` transactions may not write; `readwrite` transactions may read and write. */
+export type TransactionMode = "read" | "readwrite";
+
 export type StorageAdapter = {
   /**
    * Runs `fn` inside a transaction and returns its result.
@@ -95,15 +98,13 @@ export type StorageAdapter = {
    * - Isolated: `readwrite` transactions must not interleave with each other.
    * - In `read` mode, write methods may throw.
    * - Must not be called from inside `fn`: nested transactions are not supported and may deadlock.
-   * - `tables` lists the application tables `fn` will access through `tx.rows`. Adapters that
-   *   must declare their scope up front (such as Dexie) use it; others may ignore it.
    *
    * `fn` should only await `tx` methods. Awaiting other async work (network, crypto, timers)
    * can commit the transaction early in some databases, such as IndexedDB.
+   *
+   * Adapters that must declare a transaction's scope up front (such as IndexedDB) must configure
+   * it when the adapter is created. Adapters may treat every transaction as `readwrite`: that is
+   * always correct, just less concurrent.
    */
-  transaction<T>(
-    mode: "read" | "readwrite",
-    tables: string[],
-    fn: (tx: StorageTx) => Promise<T>,
-  ): Promise<T>;
+  transaction<T>(mode: TransactionMode, fn: (tx: StorageTx) => Promise<T>): Promise<T>;
 };

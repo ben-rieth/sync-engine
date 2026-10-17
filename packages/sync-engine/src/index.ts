@@ -5,4 +5,4 @@ export {
   type HybridLogicalClockOptions,
 } from "./core/hlc/clock";
 
-export type { StorageAdapter, StorageTx } from "./core/storage";
+export type { StorageAdapter, StorageTx, TransactionMode } from "./core/storage";

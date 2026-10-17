@@ -194,7 +194,11 @@ importers:
         specifier: ^5.0.4
         version: 5.0.4(vite@8.3.4(yaml@2.9.1))
 
-  packages/sync-engine: {}
+  packages/sync-engine:
+    dependencies:
+      vitest:
+        specifier: ^5.0.0
+        version: 5.0.4(vite@8.3.4(yaml@2.9.1))
 
 packages:
 

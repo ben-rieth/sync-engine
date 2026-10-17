@@ -1,6 +1,6 @@
 import { type DeltaKey, deltaKey, type Delta } from "#core/delta";
 import { objectKey, type ObjectKey } from "#core/object";
-import type { MetaKey, StorageAdapter, StorageTx } from "#core/storage";
+import type { MetaKey, StorageAdapter, StorageTx, TransactionMode } from "#core/storage";
 
 type MemoryState = {
   rows: Map<string, Map<string, Record<string, unknown>>>;
@@ -31,7 +31,7 @@ const tableRows = (state: MemoryState, table: string) => {
   return rows;
 };
 
-const createTx = (getState: () => MemoryState, mode: "read" | "readwrite"): StorageTx => {
+const createTx = (getState: () => MemoryState, mode: TransactionMode): StorageTx => {
   const writable = () => {
     if (mode !== "readwrite") {
       throw new Error("Cannot write in read transaction");
@@ -161,11 +161,7 @@ export const clientMemoryStorage = (): StorageAdapter & { state: MemoryState } =
   };
   let queue: Promise<unknown> = Promise.resolve();
 
-  const transaction = <T>(
-    mode: "read" | "readwrite",
-    _tables: string[],
-    fn: (tx: StorageTx) => Promise<T>,
-  ) => {
+  const transaction = <T>(mode: TransactionMode, fn: (tx: StorageTx) => Promise<T>) => {
     const run = async () => {
       const snapshot = mode === "readwrite" ? snapshotState(state) : null;
       let active = true;
