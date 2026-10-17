@@ -5,4 +5,21 @@ export {
   type HybridLogicalClockOptions,
 } from "./core/hlc/clock";
 
-export type { StorageAdapter, StorageTx, TransactionMode } from "./core/storage";
+export {
+  createSyncClient,
+  type InsertOptions,
+  type SyncClient,
+  type SyncClientOptions,
+} from "./core/client/client";
+
+export {
+  deltaKey,
+  type CellRef,
+  type DeleteDelta,
+  type Delta,
+  type DeltaKey,
+  type SetDelta,
+} from "./core/delta";
+export { objectKey, type ObjectKey, type ObjectRef } from "./core/object";
+
+export type { MetaKey, StorageAdapter, StorageTx, TransactionMode } from "./core/storage";
