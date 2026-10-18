@@ -29,7 +29,9 @@ describe("serverMemoryDatabase", () => {
 
     await db.push("user-1", [delta(1_100)]);
 
-    expect(timestamps((await pull(db)).deltas)).toEqual(timestamps([delta(1_100)]));
+    const page = await pull(db);
+
+    expect(timestamps(page.deltas)).toEqual(timestamps([delta(1_100)]));
   });
 
   it("keeps the first delta when a timestamp is pushed again with different content", async () => {
@@ -38,7 +40,9 @@ describe("serverMemoryDatabase", () => {
     await db.push("user-1", [delta(1)]);
     await db.push("user-1", [delta(1, "node-a", "changed")]);
 
-    expect((await pull(db)).deltas).toEqual([delta(1)]);
+    const page = await pull(db);
+
+    expect(page.deltas).toEqual([delta(1)]);
   });
 
   describe("cursors", () => {
@@ -46,8 +50,11 @@ describe("serverMemoryDatabase", () => {
       const db = serverMemoryDatabase();
       await db.push("user-1", []);
 
-      expect(await pull(db)).toEqual({ deltas: [], cursor: "0", hasMore: false });
-      expect(await pull(db, null, { userId: "nobody" })).toEqual({
+      const page = await pull(db);
+      const unknownUserPage = await pull(db, null, { userId: "nobody" });
+
+      expect(page).toEqual({ deltas: [], cursor: "0", hasMore: false });
+      expect(unknownUserPage).toEqual({
         deltas: [],
         cursor: "0",
         hasMore: false,
@@ -58,7 +65,9 @@ describe("serverMemoryDatabase", () => {
       const db = serverMemoryDatabase();
       await db.push("user-1", [delta(1, "node-a"), delta(2, "node-a"), delta(3, "node-a")]);
 
-      expect(await pull(db, null, { excludeNodeId: "node-a", limit: 2 })).toEqual({
+      const page = await pull(db, null, { excludeNodeId: "node-a", limit: 2 });
+
+      expect(page).toEqual({
         deltas: [],
         cursor: "3",
         hasMore: false,
@@ -82,7 +91,9 @@ describe("serverMemoryDatabase", () => {
       const db = serverMemoryDatabase();
       await db.push("user-1", [delta(1)]);
 
-      expect(await pull(db, "50")).toEqual({ deltas: [], cursor: "50", hasMore: false });
+      const page = await pull(db, "50");
+
+      expect(page).toEqual({ deltas: [], cursor: "50", hasMore: false });
     });
   });
 });

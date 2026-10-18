@@ -69,7 +69,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
     let adapter: StorageAdapter | undefined;
 
     const live = (): StorageAdapter => {
-      if (!adapter) throw new Error("adapter not created");
+      if (!adapter) {
+        throw new Error("adapter not created");
+      }
       return adapter;
     };
 
@@ -79,7 +81,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
     });
 
     afterEach(async () => {
-      if (adapter) await options.destroy?.(adapter);
+      if (adapter) {
+        await options.destroy?.(adapter);
+      }
       adapter = undefined;
     });
 
@@ -89,7 +93,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
     describe("rows", () => {
       it("get returns undefined for a missing row", async () => {
-        expect(await ro((tx) => tx.rows.get(table, "missing"))).toBeUndefined();
+        const row = await ro((tx) => tx.rows.get(table, "missing"));
+
+        expect(row).toBeUndefined();
       });
 
       it("upsert creates the row as { id, ...patch }", async () => {
@@ -97,7 +103,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           tx.rows.upsert(table, "obj-1", { title: "hello", done: false, note: null, count: 3 }),
         );
 
-        expect(await ro((tx) => tx.rows.get(table, "obj-1"))).toEqual({
+        const row = await ro((tx) => tx.rows.get(table, "obj-1"));
+
+        expect(row).toEqual({
           id: "obj-1",
           title: "hello",
           done: false,
@@ -110,7 +118,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         await rw((tx) => tx.rows.upsert(table, "obj-1", { title: "hello", done: false }));
         await rw((tx) => tx.rows.upsert(table, "obj-1", { done: true }));
 
-        expect(await ro((tx) => tx.rows.get(table, "obj-1"))).toEqual({
+        const row = await ro((tx) => tx.rows.get(table, "obj-1"));
+
+        expect(row).toEqual({
           id: "obj-1",
           title: "hello",
           done: true,
@@ -120,22 +130,28 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
       it("upsert ignores an id in the patch when creating", async () => {
         await rw((tx) => tx.rows.upsert(table, "obj-1", { id: "obj-2", title: "hello" }));
 
-        expect(await ro((tx) => tx.rows.get(table, "obj-1"))).toEqual({
+        const obj1 = await ro((tx) => tx.rows.get(table, "obj-1"));
+        const obj2 = await ro((tx) => tx.rows.get(table, "obj-2"));
+
+        expect(obj1).toEqual({
           id: "obj-1",
           title: "hello",
         });
-        expect(await ro((tx) => tx.rows.get(table, "obj-2"))).toBeUndefined();
+        expect(obj2).toBeUndefined();
       });
 
       it("upsert ignores an id in the patch when updating", async () => {
         await rw((tx) => tx.rows.upsert(table, "obj-1", { title: "hello" }));
         await rw((tx) => tx.rows.upsert(table, "obj-1", { id: "obj-2", title: "bye" }));
 
-        expect(await ro((tx) => tx.rows.get(table, "obj-1"))).toEqual({
+        const obj1 = await ro((tx) => tx.rows.get(table, "obj-1"));
+        const obj2 = await ro((tx) => tx.rows.get(table, "obj-2"));
+
+        expect(obj1).toEqual({
           id: "obj-1",
           title: "bye",
         });
-        expect(await ro((tx) => tx.rows.get(table, "obj-2"))).toBeUndefined();
+        expect(obj2).toBeUndefined();
       });
 
       it("mutating a returned row does not change stored data", async () => {
@@ -156,7 +172,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         row.info.n = 2;
         row.info.deep.ok = false;
 
-        expect(await ro((tx) => tx.rows.get(table, "obj-1"))).toEqual({
+        const stored = await ro((tx) => tx.rows.get(table, "obj-1"));
+
+        expect(stored).toEqual({
           id: "obj-1",
           title: "hello",
           tags: ["a"],
@@ -182,15 +200,20 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         await rw((tx) => tx.rows.upsert(table, "obj-1", { title: "hello" }));
         await rw((tx) => tx.rows.delete(table, "obj-1"));
 
-        expect(await ro((tx) => tx.rows.get(table, "obj-1"))).toBeUndefined();
+        const row = await ro((tx) => tx.rows.get(table, "obj-1"));
+
+        expect(row).toBeUndefined();
       });
 
       it("delete of a missing row does nothing", async () => {
         await rw((tx) => tx.rows.upsert(table, "obj-1", { title: "hello" }));
         await rw((tx) => tx.rows.delete(table, "missing"));
 
-        expect(await ro((tx) => tx.rows.get(table, "missing"))).toBeUndefined();
-        expect(await ro((tx) => tx.rows.get(table, "obj-1"))).toEqual({
+        const missing = await ro((tx) => tx.rows.get(table, "missing"));
+        const row = await ro((tx) => tx.rows.get(table, "obj-1"));
+
+        expect(missing).toBeUndefined();
+        expect(row).toEqual({
           id: "obj-1",
           title: "hello",
         });
@@ -202,19 +225,25 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           await tx.rows.upsert(otherTable, "obj-1", { title: "second" });
         });
 
-        expect(await ro((tx) => tx.rows.get(table, "obj-1"))).toEqual({
+        const row = await ro((tx) => tx.rows.get(table, "obj-1"));
+        const otherRow = await ro((tx) => tx.rows.get(otherTable, "obj-1"));
+
+        expect(row).toEqual({
           id: "obj-1",
           title: "first",
         });
-        expect(await ro((tx) => tx.rows.get(otherTable, "obj-1"))).toEqual({
+        expect(otherRow).toEqual({
           id: "obj-1",
           title: "second",
         });
 
         await rw((tx) => tx.rows.delete(table, "obj-1"));
 
-        expect(await ro((tx) => tx.rows.get(table, "obj-1"))).toBeUndefined();
-        expect(await ro((tx) => tx.rows.get(otherTable, "obj-1"))).toEqual({
+        const deletedRow = await ro((tx) => tx.rows.get(table, "obj-1"));
+        const survivingRow = await ro((tx) => tx.rows.get(otherTable, "obj-1"));
+
+        expect(deletedRow).toBeUndefined();
+        expect(survivingRow).toEqual({
           id: "obj-1",
           title: "second",
         });
@@ -231,25 +260,33 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         await rw((tx) => tx.outbox.add([c, a]));
         await rw((tx) => tx.outbox.add([d, b]));
 
-        expect(await ro((tx) => tx.outbox.list())).toEqual([a, b, c, d]);
+        const list = await ro((tx) => tx.outbox.list());
+
+        expect(list).toEqual([a, b, c, d]);
       });
 
       it("list(limit) returns the oldest `limit` deltas", async () => {
         const deltas = [5, 3, 1, 4, 2].map((n) => setDelta({ timestamp: ts(n), value: n }));
         await rw((tx) => tx.outbox.add(deltas));
 
-        expect(await ro((tx) => tx.outbox.list(2))).toEqual([
+        const list = await ro((tx) => tx.outbox.list(2));
+
+        expect(list).toEqual([
           setDelta({ timestamp: ts(1), value: 1 }),
           setDelta({ timestamp: ts(2), value: 2 }),
         ]);
       });
 
       it("list on an empty outbox returns an empty array", async () => {
-        expect(await ro((tx) => tx.outbox.list())).toEqual([]);
+        const list = await ro((tx) => tx.outbox.list());
+
+        expect(list).toEqual([]);
       });
 
       it("count returns the number of pending deltas", async () => {
-        expect(await ro((tx) => tx.outbox.count())).toBe(0);
+        const before = await ro((tx) => tx.outbox.count());
+
+        expect(before).toBe(0);
 
         await rw((tx) =>
           tx.outbox.add([
@@ -259,7 +296,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           ]),
         );
 
-        expect(await ro((tx) => tx.outbox.count())).toBe(3);
+        const after = await ro((tx) => tx.outbox.count());
+
+        expect(after).toBe(3);
       });
 
       it("moveToHistory removes deltas from the outbox and adds them to history", async () => {
@@ -268,11 +307,13 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
         await rw((tx) => tx.outbox.moveToHistory([ts(1), ts(3)]));
 
-        expect(await ro((tx) => tx.outbox.list())).toEqual([deltas[1]]);
-        expect(await ro((tx) => tx.outbox.count())).toBe(1);
-        expect(await ro((tx) => tx.history.has([ts(1), ts(2), ts(3)]))).toEqual(
-          new Set([ts(1), ts(3)]),
-        );
+        const list = await ro((tx) => tx.outbox.list());
+        const count = await ro((tx) => tx.outbox.count());
+        const history = await ro((tx) => tx.history.has([ts(1), ts(2), ts(3)]));
+
+        expect(list).toEqual([deltas[1]]);
+        expect(count).toBe(1);
+        expect(history).toEqual(new Set([ts(1), ts(3)]));
       });
 
       it("moveToHistory ignores timestamps not in the outbox", async () => {
@@ -281,8 +322,11 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
         await rw((tx) => tx.outbox.moveToHistory([ts(9)]));
 
-        expect(await ro((tx) => tx.outbox.list())).toEqual([delta]);
-        expect(await ro((tx) => tx.history.has([ts(1), ts(9)]))).toEqual(new Set());
+        const list = await ro((tx) => tx.outbox.list());
+        const history = await ro((tx) => tx.history.has([ts(1), ts(9)]));
+
+        expect(list).toEqual([delta]);
+        expect(history).toEqual(new Set());
       });
 
       it("moved deltas still count for latest and deleted", async () => {
@@ -294,10 +338,11 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         );
         await rw((tx) => tx.outbox.moveToHistory([ts(1), ts(2)]));
 
-        expect(await ro((tx) => tx.latest([cell()]))).toEqual(new Map([[deltaKey(cell()), ts(1)]]));
-        expect(await ro((tx) => tx.deleted([obj("obj-2")]))).toEqual(
-          new Set([objectKey(obj("obj-2"))]),
-        );
+        const latest = await ro((tx) => tx.latest([cell()]));
+        const deleted = await ro((tx) => tx.deleted([obj("obj-2")]));
+
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(1)]]));
+        expect(deleted).toEqual(new Set([objectKey(obj("obj-2"))]));
       });
 
       it("set and delete deltas round-trip through list unchanged", async () => {
@@ -315,7 +360,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         ];
         await rw((tx) => tx.outbox.add(deltas));
 
-        expect(await ro((tx) => tx.outbox.list())).toEqual(deltas);
+        const list = await ro((tx) => tx.outbox.list());
+
+        expect(list).toEqual(deltas);
       });
     });
 
@@ -325,17 +372,21 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           tx.history.add([setDelta({ timestamp: ts(1) }), deleteDelta({ timestamp: ts(2) })]),
         );
 
-        expect(await ro((tx) => tx.history.has([ts(1), ts(2), ts(3)]))).toEqual(
-          new Set([ts(1), ts(2)]),
-        );
-        expect(await ro((tx) => tx.history.has([ts(3)]))).toEqual(new Set());
-        expect(await ro((tx) => tx.history.has([]))).toEqual(new Set());
+        const stored = await ro((tx) => tx.history.has([ts(1), ts(2), ts(3)]));
+        const unknown = await ro((tx) => tx.history.has([ts(3)]));
+        const empty = await ro((tx) => tx.history.has([]));
+
+        expect(stored).toEqual(new Set([ts(1), ts(2)]));
+        expect(unknown).toEqual(new Set());
+        expect(empty).toEqual(new Set());
       });
 
       it("has does not see outbox deltas", async () => {
         await rw((tx) => tx.outbox.add([setDelta({ timestamp: ts(1) })]));
 
-        expect(await ro((tx) => tx.history.has([ts(1)]))).toEqual(new Set());
+        const history = await ro((tx) => tx.history.has([ts(1)]));
+
+        expect(history).toEqual(new Set());
       });
 
       it("add with an already-stored timestamp skips it without error or overwrite", async () => {
@@ -351,10 +402,11 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           ),
         ).resolves.toBeUndefined();
 
-        expect(await ro((tx) => tx.latest([cell(), otherCell]))).toEqual(
-          new Map([[deltaKey(cell()), ts(1)]]),
-        );
-        expect(await ro((tx) => tx.deleted([obj("obj-3")]))).toEqual(new Set());
+        const latest = await ro((tx) => tx.latest([cell(), otherCell]));
+        const deleted = await ro((tx) => tx.deleted([obj("obj-3")]));
+
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(1)]]));
+        expect(deleted).toEqual(new Set());
       });
 
       it("add skips a timestamp that was moved from the outbox", async () => {
@@ -363,8 +415,11 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
         await rw((tx) => tx.history.add([deleteDelta({ timestamp: ts(1), objectId: "obj-2" })]));
 
-        expect(await ro((tx) => tx.latest([cell()]))).toEqual(new Map([[deltaKey(cell()), ts(1)]]));
-        expect(await ro((tx) => tx.deleted([obj("obj-2")]))).toEqual(new Set());
+        const latest = await ro((tx) => tx.latest([cell()]));
+        const deleted = await ro((tx) => tx.deleted([obj("obj-2")]));
+
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(1)]]));
+        expect(deleted).toEqual(new Set());
       });
     });
 
@@ -378,7 +433,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           ]),
         );
 
-        expect(await ro((tx) => tx.latest([cell()]))).toEqual(new Map([[deltaKey(cell()), ts(5)]]));
+        const latest = await ro((tx) => tx.latest([cell()]));
+
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(5)]]));
       });
 
       it("returns the newest timestamp from the outbox", async () => {
@@ -386,7 +443,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           tx.outbox.add([setDelta({ timestamp: ts(4) }), setDelta({ timestamp: ts(2) })]),
         );
 
-        expect(await ro((tx) => tx.latest([cell()]))).toEqual(new Map([[deltaKey(cell()), ts(4)]]));
+        const latest = await ro((tx) => tx.latest([cell()]));
+
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(4)]]));
       });
 
       it("prefers a newer outbox delta over history", async () => {
@@ -395,7 +454,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           await tx.outbox.add([setDelta({ timestamp: ts(7) })]);
         });
 
-        expect(await ro((tx) => tx.latest([cell()]))).toEqual(new Map([[deltaKey(cell()), ts(7)]]));
+        const latest = await ro((tx) => tx.latest([cell()]));
+
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(7)]]));
       });
 
       it("prefers a newer history delta over the outbox", async () => {
@@ -404,7 +465,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           await tx.history.add([setDelta({ timestamp: ts(7) })]);
         });
 
-        expect(await ro((tx) => tx.latest([cell()]))).toEqual(new Map([[deltaKey(cell()), ts(7)]]));
+        const latest = await ro((tx) => tx.latest([cell()]));
+
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(7)]]));
       });
 
       it("orders timestamps by HLC, including logical time and node id", async () => {
@@ -419,7 +482,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           ]);
         });
 
-        expect(await ro((tx) => tx.latest([a, b]))).toEqual(
+        const latest = await ro((tx) => tx.latest([a, b]));
+
+        expect(latest).toEqual(
           new Map([
             [deltaKey(a), hlc(10, 10)],
             [deltaKey(b), ts(10, "node-b")],
@@ -431,10 +496,11 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         await rw((tx) => tx.history.add([setDelta({ timestamp: ts(1) })]));
 
         const missing = cell({ column: "missing" });
-        expect(await ro((tx) => tx.latest([cell(), missing]))).toEqual(
-          new Map([[deltaKey(cell()), ts(1)]]),
-        );
-        expect(await ro((tx) => tx.latest([]))).toEqual(new Map());
+        const latest = await ro((tx) => tx.latest([cell(), missing]));
+        const empty = await ro((tx) => tx.latest([]));
+
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(1)]]));
+        expect(empty).toEqual(new Map());
       });
 
       it("keys the map with deltaKey", async () => {
@@ -462,7 +528,10 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           ]);
         });
 
-        expect(await ro((tx) => tx.latest([base, byTable, byObject, byColumn]))).toEqual(
+        const latest = await ro((tx) => tx.latest([base, byTable, byObject, byColumn]));
+        const latestByObject = await ro((tx) => tx.latest([byObject]));
+
+        expect(latest).toEqual(
           new Map([
             [deltaKey(base), ts(1)],
             [deltaKey(byTable), ts(2)],
@@ -470,17 +539,15 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
             [deltaKey(byColumn), ts(4)],
           ]),
         );
-        expect(await ro((tx) => tx.latest([byObject]))).toEqual(
-          new Map([[deltaKey(byObject), ts(3)]]),
-        );
+        expect(latestByObject).toEqual(new Map([[deltaKey(byObject), ts(3)]]));
       });
 
       it("accepts duplicate cells in the input", async () => {
         await rw((tx) => tx.history.add([setDelta({ timestamp: ts(1) })]));
 
-        expect(await ro((tx) => tx.latest([cell(), cell(), { ...cell() }]))).toEqual(
-          new Map([[deltaKey(cell()), ts(1)]]),
-        );
+        const latest = await ro((tx) => tx.latest([cell(), cell(), { ...cell() }]));
+
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(1)]]));
       });
 
       it("ignores delete deltas", async () => {
@@ -494,9 +561,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           await tx.outbox.add([deleteDelta({ timestamp: ts(9) })]);
         });
 
-        expect(await ro((tx) => tx.latest([cell(), deletedOnly]))).toEqual(
-          new Map([[deltaKey(cell()), ts(1)]]),
-        );
+        const latest = await ro((tx) => tx.latest([cell(), deletedOnly]));
+
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(1)]]));
       });
 
       it("handles 5,000 cells", async () => {
@@ -517,17 +584,17 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
       it("finds deletes in history", async () => {
         await rw((tx) => tx.history.add([deleteDelta({ timestamp: ts(1) })]));
 
-        expect(await ro((tx) => tx.deleted([obj("obj-1")]))).toEqual(
-          new Set([objectKey(obj("obj-1"))]),
-        );
+        const deleted = await ro((tx) => tx.deleted([obj("obj-1")]));
+
+        expect(deleted).toEqual(new Set([objectKey(obj("obj-1"))]));
       });
 
       it("finds deletes in the outbox", async () => {
         await rw((tx) => tx.outbox.add([deleteDelta({ timestamp: ts(1) })]));
 
-        expect(await ro((tx) => tx.deleted([obj("obj-1")]))).toEqual(
-          new Set([objectKey(obj("obj-1"))]),
-        );
+        const deleted = await ro((tx) => tx.deleted([obj("obj-1")]));
+
+        expect(deleted).toEqual(new Set([objectKey(obj("obj-1"))]));
       });
 
       it("ignores set deltas", async () => {
@@ -536,7 +603,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           await tx.outbox.add([setDelta({ timestamp: ts(2) })]);
         });
 
-        expect(await ro((tx) => tx.deleted([obj("obj-1")]))).toEqual(new Set());
+        const deleted = await ro((tx) => tx.deleted([obj("obj-1")]));
+
+        expect(deleted).toEqual(new Set());
       });
 
       it("builds entries with objectKey", async () => {
@@ -551,16 +620,19 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
       it("does not report the same objectId in another table", async () => {
         await rw((tx) => tx.history.add([deleteDelta({ timestamp: ts(1) })]));
 
-        expect(await ro((tx) => tx.deleted([obj("obj-1", otherTable)]))).toEqual(new Set());
+        const deleted = await ro((tx) => tx.deleted([obj("obj-1", otherTable)]));
+
+        expect(deleted).toEqual(new Set());
       });
 
       it("omits objects without deletes", async () => {
         await rw((tx) => tx.outbox.add([deleteDelta({ timestamp: ts(1) })]));
 
-        expect(await ro((tx) => tx.deleted([obj("obj-1"), obj("obj-2"), obj("obj-1")]))).toEqual(
-          new Set([objectKey(obj("obj-1"))]),
-        );
-        expect(await ro((tx) => tx.deleted([]))).toEqual(new Set());
+        const deleted = await ro((tx) => tx.deleted([obj("obj-1"), obj("obj-2"), obj("obj-1")]));
+        const empty = await ro((tx) => tx.deleted([]));
+
+        expect(deleted).toEqual(new Set([objectKey(obj("obj-1"))]));
+        expect(empty).toEqual(new Set());
       });
 
       it("handles 5,000 objects", async () => {
@@ -579,28 +651,41 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
     describe("meta", () => {
       it("get returns undefined for an unset key", async () => {
-        expect(await ro((tx) => tx.meta.get("cursor"))).toBeUndefined();
+        const cursor = await ro((tx) => tx.meta.get("cursor"));
+
+        expect(cursor).toBeUndefined();
       });
 
       it("set then get round-trips", async () => {
         await rw((tx) => tx.meta.set("cursor", "abc"));
 
-        expect(await ro((tx) => tx.meta.get("cursor"))).toBe("abc");
-        expect(await ro((tx) => tx.meta.get("clock"))).toBeUndefined();
+        const cursor = await ro((tx) => tx.meta.get("cursor"));
+        const clock = await ro((tx) => tx.meta.get("clock"));
+
+        expect(cursor).toBe("abc");
+        expect(clock).toBeUndefined();
       });
 
       it("set overwrites the existing value", async () => {
         await rw((tx) => tx.meta.set("nodeId", "first"));
         await rw((tx) => tx.meta.set("nodeId", "second"));
 
-        expect(await ro((tx) => tx.meta.get("nodeId"))).toBe("second");
+        const nodeId = await ro((tx) => tx.meta.get("nodeId"));
+
+        expect(nodeId).toBe("second");
       });
     });
 
     describe("transactions", () => {
       it("returns the callback's result", async () => {
-        expect(await rw(async () => ({ ok: 1 }))).toEqual({ ok: 1 });
-        expect(await ro(async (tx) => (await tx.outbox.count()) + 41)).toBe(41);
+        const written = await rw(async () => ({ ok: 1 }));
+        const read = await ro(async (tx) => {
+          const count = await tx.outbox.count();
+          return count + 41;
+        });
+
+        expect(written).toEqual({ ok: 1 });
+        expect(read).toBe(41);
       });
 
       it("reads its own writes", async () => {
@@ -613,15 +698,15 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           await tx.history.add([setDelta({ timestamp: ts(3), column: "body" })]);
           await tx.meta.set("cursor", "c1");
 
-          return {
-            row: await tx.rows.get(table, "obj-1"),
-            list: await tx.outbox.list(),
-            count: await tx.outbox.count(),
-            has: await tx.history.has([ts(1), ts(3)]),
-            latest: await tx.latest([cell(), cell({ column: "body" })]),
-            deleted: await tx.deleted([obj("obj-2")]),
-            meta: await tx.meta.get("cursor"),
-          };
+          const row = await tx.rows.get(table, "obj-1");
+          const list = await tx.outbox.list();
+          const count = await tx.outbox.count();
+          const has = await tx.history.has([ts(1), ts(3)]);
+          const latest = await tx.latest([cell(), cell({ column: "body" })]);
+          const deleted = await tx.deleted([obj("obj-2")]);
+          const meta = await tx.meta.get("cursor");
+
+          return { row, list, count, has, latest, deleted, meta };
         });
 
         expect(result).toEqual({
@@ -653,11 +738,11 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           await tx.outbox.moveToHistory([ts(1)]);
           await tx.rows.delete(table, "obj-1");
 
-          return {
-            row: await tx.rows.get(table, "obj-1"),
-            count: await tx.outbox.count(),
-            has: await tx.history.has([ts(1), ts(3)]),
-          };
+          const row = await tx.rows.get(table, "obj-1");
+          const count = await tx.outbox.count();
+          const has = await tx.history.has([ts(1), ts(3)]);
+
+          return { row, count, has };
         });
 
         expect(result).toEqual({ row: undefined, count: 1, has: new Set([ts(3), ts(1)]) });
@@ -671,14 +756,16 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           await tx.meta.set("userId", "u1");
         });
 
-        const result = await ro(async (tx) => ({
-          row: await tx.rows.get(table, "obj-1"),
-          list: await tx.outbox.list(),
-          has: await tx.history.has([ts(2)]),
-          latest: await tx.latest([cell()]),
-          deleted: await tx.deleted([obj("obj-2")]),
-          meta: await tx.meta.get("userId"),
-        }));
+        const result = await ro(async (tx) => {
+          const row = await tx.rows.get(table, "obj-1");
+          const list = await tx.outbox.list();
+          const has = await tx.history.has([ts(2)]);
+          const latest = await tx.latest([cell()]);
+          const deleted = await tx.deleted([obj("obj-2")]);
+          const meta = await tx.meta.get("userId");
+
+          return { row, list, has, latest, deleted, meta };
+        });
 
         expect(result).toEqual({
           row: { id: "obj-1", title: "hello" },
@@ -720,18 +807,20 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
         await expect(failing).rejects.toBe(error);
 
-        const state = await ro(async (tx) => ({
-          keep: await tx.rows.get(table, "keep"),
-          doomed: await tx.rows.get(table, "doomed"),
-          created: await tx.rows.get(table, "new"),
-          outbox: await tx.outbox.list(),
-          count: await tx.outbox.count(),
-          history: await tx.history.has([ts(1), ts(2), ts(3), ts(4), ts(5), ts(6), ts(7)]),
-          latest: await tx.latest([cell(), cell({ column: "body" })]),
-          deleted: await tx.deleted([obj("obj-8"), obj("obj-9")]),
-          cursor: await tx.meta.get("cursor"),
-          clock: await tx.meta.get("clock"),
-        }));
+        const state = await ro(async (tx) => {
+          const keep = await tx.rows.get(table, "keep");
+          const doomed = await tx.rows.get(table, "doomed");
+          const created = await tx.rows.get(table, "new");
+          const outbox = await tx.outbox.list();
+          const count = await tx.outbox.count();
+          const history = await tx.history.has([ts(1), ts(2), ts(3), ts(4), ts(5), ts(6), ts(7)]);
+          const latest = await tx.latest([cell(), cell({ column: "body" })]);
+          const deleted = await tx.deleted([obj("obj-8"), obj("obj-9")]);
+          const cursor = await tx.meta.get("cursor");
+          const clock = await tx.meta.get("clock");
+
+          return { keep, doomed, created, outbox, count, history, latest, deleted, cursor, clock };
+        });
 
         expect(state).toEqual({
           keep: { id: "keep", title: "original" },
@@ -761,7 +850,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
         await rw((tx) => tx.meta.set("cursor", "kept"));
 
-        expect(await ro((tx) => tx.meta.get("cursor"))).toBe("kept");
+        const cursor = await ro((tx) => tx.meta.get("cursor"));
+
+        expect(cursor).toBe("kept");
       });
 
       it("does not interleave concurrent readwrite transactions", async () => {
@@ -769,7 +860,8 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
         const increment = () =>
           rw(async (tx) => {
-            const current = Number((await tx.meta.get("cursor")) ?? "0");
+            const cursor = await tx.meta.get("cursor");
+            const current = Number(cursor ?? "0");
             await tx.rows.get(table, "obj-1");
             await tx.outbox.count();
             await tx.history.has([ts(1)]);
@@ -779,7 +871,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
         await Promise.all([increment(), increment()]);
 
-        expect(await ro((tx) => tx.meta.get("cursor"))).toBe("2");
+        const cursor = await ro((tx) => tx.meta.get("cursor"));
+
+        expect(cursor).toBe("2");
       });
     });
   });

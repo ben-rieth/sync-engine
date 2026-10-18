@@ -87,7 +87,7 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
   // readwrite so two tabs starting at once agree on a single node id
   const nodeId = await storage.transaction("readwrite", async (tx) => {
     let saved = await tx.meta.get("nodeId");
-    if (!saved) {
+    if (saved === undefined) {
       saved = generateNodeId();
       assertNodeId(saved);
       await tx.meta.set("nodeId", saved);
@@ -111,7 +111,7 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
   const write = <T>(fn: (ctx: WriteContext) => Promise<T>): Promise<T> =>
     storage.transaction("readwrite", async (tx) => {
       const stored = await tx.meta.get("clock");
-      if (stored && stored !== knownClock) {
+      if (stored !== undefined && stored !== knownClock) {
         const storedClock = HLCTimestamp.tryParse(stored);
         if (!storedClock) {
           throw new Error(`Stored clock is corrupt: ${stored}`);

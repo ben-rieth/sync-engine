@@ -18,6 +18,8 @@ export type CellRef = { table: string; objectId: string; column: string };
 
 export const deltaKey = (cell: CellRef): DeltaKey => {
   const key = JSON.stringify([cell.table, cell.objectId, cell.column]);
-  if (!isDeltaKey(key)) throw new Error("unreachable: JSON array encoding");
+  if (!isDeltaKey(key)) {
+    throw new Error("unreachable: JSON array encoding");
+  }
   return key;
 };

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ClockDriftError, HybridLogicalClock } from "#core/hlc/clock";
 import { HLCTimestamp, MAX_LOGICAL } from "#core/hlc/timestamp";
+import { elementAt } from "../../helpers";
 
 const NODE = "local";
 const REMOTE = "remote";
@@ -47,18 +48,29 @@ const expectGreater = (a: HLCTimestamp, b: HLCTimestamp) => {
   );
 };
 
+const expectIncreasing = (timestamps: HLCTimestamp[]) => {
+  let previous: HLCTimestamp | undefined;
+  for (const current of timestamps) {
+    if (previous !== undefined) {
+      expectGreater(current, previous);
+    }
+    previous = current;
+  }
+};
+
 // Interleaves ticks from two tabs sharing a nodeId, occasionally advancing
 // time, and returns every issued timestamp.
 const runTabs = (shareState: boolean) => {
   let wallTime = 1000;
   const now = () => wallTime;
-  const tabs = [new HybridLogicalClock(NODE, { now }), new HybridLogicalClock(NODE, { now })];
+  const firstTab = new HybridLogicalClock(NODE, { now });
+  const secondTab = new HybridLogicalClock(NODE, { now });
   let shared: HLCTimestamp | null = null;
   const issued: HLCTimestamp[] = [];
 
   for (let i = 0; i < 25_000; i++) {
     // Uneven pattern so each tab sometimes ticks several times in a row.
-    const tab = tabs[i % 7 < 4 ? 0 : 1]!;
+    const tab = i % 7 < 4 ? firstTab : secondTab;
     if (i % 50 === 0) {
       wallTime++;
     }
@@ -423,12 +435,10 @@ describe("HybridLogicalClock", () => {
 
       const ticks = Array.from({ length: 10_001 }, () => clock.tick());
 
-      for (let i = 1; i < ticks.length; i++) {
-        expectGreater(ticks[i]!, ticks[i - 1]!);
-      }
-      expectTimestamp(ticks[0]!, 1000, 0);
-      expectTimestamp(ticks[9_999]!, 1000, MAX_LOGICAL);
-      expectTimestamp(ticks[10_000]!, 1001, 0);
+      expectIncreasing(ticks);
+      expectTimestamp(elementAt(ticks, 0), 1000, 0);
+      expectTimestamp(elementAt(ticks, 9_999), 1000, MAX_LOGICAL);
+      expectTimestamp(elementAt(ticks, 10_000), 1001, 0);
     });
 
     it("tick stays ahead of a restored last timestamp when wall time goes backwards", () => {
@@ -466,9 +476,7 @@ describe("HybridLogicalClock", () => {
 
         const unique = new Set(issued.map((t) => t.toString()));
         expect(unique.size).toBe(issued.length);
-        for (let i = 1; i < issued.length; i++) {
-          expectGreater(issued[i]!, issued[i - 1]!);
-        }
+        expectIncreasing(issued);
       });
 
       it("do issue duplicate timestamps without sharing state (control)", () => {

@@ -48,7 +48,9 @@ export const runServerDatabaseConformance = (
     let adapter: ServerDatabaseAdapter | undefined;
 
     const live = (): ServerDatabaseAdapter => {
-      if (!adapter) throw new Error("adapter not created");
+      if (!adapter) {
+        throw new Error("adapter not created");
+      }
       return adapter;
     };
 
@@ -58,7 +60,9 @@ export const runServerDatabaseConformance = (
     });
 
     afterEach(async () => {
-      if (adapter) await options.destroy?.(adapter);
+      if (adapter) {
+        await options.destroy?.(adapter);
+      }
       adapter = undefined;
     });
 
@@ -71,9 +75,10 @@ export const runServerDatabaseConformance = (
 
     /** Follows the cursor until `hasMore` is false, checking the paging invariants on every page. */
     const pullAll = async (
-      cursor: string | null = null,
+      startCursor: string | null = null,
       { userId = "user-1", excludeNodeId = "node-z", limit = 2 } = {},
     ) => {
+      let cursor = startCursor;
       const seen: Delta[] = [];
       let pages = 0;
       let page: PullResult;
@@ -82,7 +87,9 @@ export const runServerDatabaseConformance = (
         page = await pull(cursor, { userId, excludeNodeId, limit });
         expect(page.deltas.length).toBeLessThanOrEqual(limit);
         // hasMore promises something to deliver, so a client following it never spins on empty pages
-        if (page.hasMore) expect(page.deltas.length).toBeGreaterThan(0);
+        if (page.hasMore) {
+          expect(page.deltas.length).toBeGreaterThan(0);
+        }
         seen.push(...page.deltas);
         cursor = page.cursor;
         pages++;
@@ -96,7 +103,9 @@ export const runServerDatabaseConformance = (
 
         await push(batch);
 
-        expect(timestamps((await pull()).deltas)).toEqual(timestamps(batch));
+        const page = await pull();
+
+        expect(timestamps(page.deltas)).toEqual(timestamps(batch));
       });
 
       it("round-trips set and delete deltas exactly", async () => {
@@ -113,34 +122,42 @@ export const runServerDatabaseConformance = (
 
         await push(deltas);
 
-        expect((await pull()).deltas).toEqual(deltas);
+        const page = await pull();
+
+        expect(page.deltas).toEqual(deltas);
       });
 
       it("accepts an empty batch", async () => {
         await push([]);
 
-        expect((await pull()).deltas).toEqual([]);
+        const page = await pull();
+
+        expect(page.deltas).toEqual([]);
       });
 
       it("ignores deltas it already has", async () => {
         await push([delta(1), delta(2)]);
         await push([delta(2), delta(3)]);
 
-        expect(timestamps((await pull()).deltas)).toEqual(
-          timestamps([delta(1), delta(2), delta(3)]),
-        );
+        const page = await pull();
+
+        expect(timestamps(page.deltas)).toEqual(timestamps([delta(1), delta(2), delta(3)]));
       });
 
       it("ignores duplicates within one batch", async () => {
         await push([delta(1), delta(1)]);
 
-        expect((await pull()).deltas).toHaveLength(1);
+        const page = await pull();
+
+        expect(page.deltas).toHaveLength(1);
       });
 
       it("stores a retried push once even when both attempts run concurrently", async () => {
         await Promise.all([push([delta(1), delta(2)]), push([delta(1), delta(2)])]);
 
-        expect(timestamps((await pull()).deltas)).toEqual(timestamps([delta(1), delta(2)]));
+        const page = await pull();
+
+        expect(timestamps(page.deltas)).toEqual(timestamps([delta(1), delta(2)]));
       });
 
       it("does not redeliver an already pulled delta when its push is retried", async () => {
@@ -149,7 +166,9 @@ export const runServerDatabaseConformance = (
 
         await push([delta(1), delta(2)]);
 
-        expect(timestamps((await pull(first.cursor)).deltas)).toEqual(timestamps([delta(2)]));
+        const second = await pull(first.cursor);
+
+        expect(timestamps(second.deltas)).toEqual(timestamps([delta(2)]));
       });
 
       it("rejects the whole batch if one timestamp is invalid", async () => {
@@ -157,7 +176,9 @@ export const runServerDatabaseConformance = (
 
         await expect(push([delta(1), bad])).rejects.toThrow("Invalid HLC timestamp");
 
-        expect((await pull()).deltas).toEqual([]);
+        const page = await pull();
+
+        expect(page.deltas).toEqual([]);
       });
 
       it("rejects the whole batch if one timestamp is too far ahead of the server clock", async () => {
@@ -165,7 +186,9 @@ export const runServerDatabaseConformance = (
 
         await expect(push([delta(1), delta(future)])).rejects.toBeInstanceOf(ClockDriftError);
 
-        expect((await pull()).deltas).toEqual([]);
+        const page = await pull();
+
+        expect(page.deltas).toEqual([]);
       });
 
       it("accepts a timestamp at the server's current time", async () => {
@@ -173,16 +196,22 @@ export const runServerDatabaseConformance = (
 
         await push([current]);
 
-        expect(timestamps((await pull()).deltas)).toEqual(timestamps([current]));
+        const page = await pull();
+
+        expect(timestamps(page.deltas)).toEqual(timestamps([current]));
       });
 
       it("stores a copy of each delta", async () => {
         const original = delta(1, "node-a", { nested: "before" });
 
         await push([original]);
-        if (original.kind === "set") original.value = { nested: "after" };
+        if (original.kind === "set") {
+          original.value = { nested: "after" };
+        }
 
-        expect((await pull()).deltas[0]).toMatchObject({ value: { nested: "before" } });
+        const page = await pull();
+
+        expect(page.deltas[0]).toMatchObject({ value: { nested: "before" } });
       });
     });
 
@@ -226,7 +255,9 @@ export const runServerDatabaseConformance = (
 
         await push([delta(1)]);
 
-        expect(timestamps((await pull(empty.cursor)).deltas)).toEqual(timestamps([delta(1)]));
+        const page = await pull(empty.cursor);
+
+        expect(timestamps(page.deltas)).toEqual(timestamps([delta(1)]));
       });
 
       it("excludes the caller's own deltas", async () => {
@@ -294,7 +325,9 @@ export const runServerDatabaseConformance = (
         await vi.waitFor(
           async () => {
             await drain();
-            if (writing) throw new Error("writers still running");
+            if (writing) {
+              throw new Error("writers still running");
+            }
           },
           { timeout: 10_000, interval: 1 },
         );
@@ -308,10 +341,15 @@ export const runServerDatabaseConformance = (
       it("returns copies that cannot change stored deltas", async () => {
         await push([delta(1, "node-a", { nested: "before" })]);
 
-        const pulled = (await pull()).deltas[0];
-        if (pulled?.kind === "set") pulled.value = { nested: "after" };
+        const first = await pull();
+        const pulled = first.deltas[0];
+        if (pulled?.kind === "set") {
+          pulled.value = { nested: "after" };
+        }
 
-        expect((await pull()).deltas[0]).toMatchObject({ value: { nested: "before" } });
+        const second = await pull();
+
+        expect(second.deltas[0]).toMatchObject({ value: { nested: "before" } });
       });
 
       it("rejects an invalid cursor", async () => {
@@ -336,17 +374,20 @@ export const runServerDatabaseConformance = (
         await push([delta(1)]);
         await push([delta(2)], "user-2");
 
-        expect(timestamps((await pull()).deltas)).toEqual(timestamps([delta(1)]));
-        expect(timestamps((await pull(null, { userId: "user-2" })).deltas)).toEqual(
-          timestamps([delta(2)]),
-        );
+        const page = await pull();
+        const otherPage = await pull(null, { userId: "user-2" });
+
+        expect(timestamps(page.deltas)).toEqual(timestamps([delta(1)]));
+        expect(timestamps(otherPage.deltas)).toEqual(timestamps([delta(2)]));
       });
 
       it("lets two users store the same timestamp", async () => {
         await push([delta(1)]);
         await push([delta(1)], "user-2");
 
-        expect((await pull(null, { userId: "user-2" })).deltas).toHaveLength(1);
+        const otherPage = await pull(null, { userId: "user-2" });
+
+        expect(otherPage.deltas).toHaveLength(1);
       });
 
       it("deleteUser removes only that user's deltas", async () => {
@@ -355,8 +396,11 @@ export const runServerDatabaseConformance = (
 
         await live().deleteUser("user-1");
 
-        expect((await pull()).deltas).toEqual([]);
-        expect((await pull(null, { userId: "user-2" })).deltas).toHaveLength(1);
+        const page = await pull();
+        const otherPage = await pull(null, { userId: "user-2" });
+
+        expect(page.deltas).toEqual([]);
+        expect(otherPage.deltas).toHaveLength(1);
       });
 
       it("accepts a previously stored timestamp again after deleteUser", async () => {
@@ -365,7 +409,9 @@ export const runServerDatabaseConformance = (
         await live().deleteUser("user-1");
         await push([delta(1)]);
 
-        expect((await pull()).deltas).toHaveLength(1);
+        const page = await pull();
+
+        expect(page.deltas).toHaveLength(1);
       });
 
       it("a cursor saved before deleteUser still sees deltas pushed afterwards", async () => {
@@ -375,7 +421,9 @@ export const runServerDatabaseConformance = (
         await live().deleteUser("user-1");
         await push([delta(4)]);
 
-        expect(timestamps((await pull(before.cursor)).deltas)).toEqual(timestamps([delta(4)]));
+        const after = await pull(before.cursor);
+
+        expect(timestamps(after.deltas)).toEqual(timestamps([delta(4)]));
       });
 
       it("deleteUser on an unknown user does nothing", async () => {

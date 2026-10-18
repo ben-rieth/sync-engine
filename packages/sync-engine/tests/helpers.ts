@@ -12,3 +12,12 @@ export const delta = (physical: number, node = "node-a", value: unknown = physic
 });
 
 export const timestamps = (deltas: Delta[]): string[] => deltas.map((d) => d.timestamp);
+
+/** Returns `list[index]`, throwing instead of returning undefined when it is out of range. */
+export const elementAt = <T>(list: readonly T[], index: number): T => {
+  const value = list[index];
+  if (value === undefined) {
+    throw new Error(`No element at index ${index} (length ${list.length})`);
+  }
+  return value;
+};

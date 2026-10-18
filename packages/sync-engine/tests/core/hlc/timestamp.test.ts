@@ -33,10 +33,12 @@ const pairs = samples.flatMap((a) =>
 );
 
 const expectSameTimestamp = (actual: HLCTimestamp | null, expected: HLCTimestamp) => {
-  expect(actual).not.toBeNull();
-  expect(actual!.physicalTime).toBe(expected.physicalTime);
-  expect(actual!.logicalTime).toBe(expected.logicalTime);
-  expect(actual!.nodeId).toBe(expected.nodeId);
+  if (actual === null) {
+    throw new Error(`Expected ${expected.toString()}, got null`);
+  }
+  expect(actual.physicalTime).toBe(expected.physicalTime);
+  expect(actual.logicalTime).toBe(expected.logicalTime);
+  expect(actual.nodeId).toBe(expected.nodeId);
 };
 
 describe("HLCTimestamp", () => {
@@ -352,8 +354,14 @@ describe("HLCTimestamp", () => {
     it("numeric ordering agrees with compare when nodeIds match", () => {
       for (const { label, a, b } of pairs) {
         const bSameNode = ts(b.physicalTime, b.logicalTime, a.nodeId);
-        const numeric =
-          a.toBigInt() < bSameNode.toBigInt() ? -1 : a.toBigInt() > bSameNode.toBigInt() ? 1 : 0;
+        const aValue = a.toBigInt();
+        const bValue = bSameNode.toBigInt();
+        let numeric = 0;
+        if (aValue < bValue) {
+          numeric = -1;
+        } else if (aValue > bValue) {
+          numeric = 1;
+        }
         expect(numeric, label).toBe(HLCTimestamp.compare(a, bSameNode));
       }
     });

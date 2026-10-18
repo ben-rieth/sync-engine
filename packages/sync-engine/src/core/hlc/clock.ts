@@ -136,14 +136,17 @@ export class HybridLogicalClock {
   }
 
   #set(physical: number, logical: number) {
+    let nextPhysical = physical;
+    let nextLogical = logical;
+
     // if logical counter gets exhausted, borrow from the future
-    if (logical > MAX_LOGICAL) {
-      physical += 1;
-      logical = 0;
+    if (nextLogical > MAX_LOGICAL) {
+      nextPhysical += 1;
+      nextLogical = 0;
     }
 
     // validate before mutating so a bad wall time can't corrupt the clock
-    const next = new HLCTimestamp(physical, logical, this.nodeId);
+    const next = new HLCTimestamp(nextPhysical, nextLogical, this.nodeId);
     this.#physical = next.physicalTime;
     this.#logical = next.logicalTime;
   }

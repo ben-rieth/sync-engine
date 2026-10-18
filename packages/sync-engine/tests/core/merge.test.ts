@@ -3,6 +3,7 @@ import { deltaKey, type Delta, type DeltaKey, type SetDelta } from "#core/delta"
 import { HLCTimestamp } from "#core/hlc/timestamp";
 import { planMerge } from "#core/merge";
 import { objectKey, type ObjectKey } from "#core/object";
+import { elementAt } from "../helpers";
 
 const TABLE = "todos";
 const OBJECT = "obj-1";
@@ -271,7 +272,9 @@ describe("planMerge", () => {
     const result = plan({ incoming: [delta(t(1), "__proto__", value)] });
 
     const write = result.writes[0];
-    if (write?.kind !== "patch") throw new Error("expected a patch write");
+    if (write?.kind !== "patch") {
+      throw new Error("expected a patch write");
+    }
     expect(Object.hasOwn(write.patch, "__proto__")).toBe(true);
     expect(Object.getOwnPropertyDescriptor(write.patch, "__proto__")?.value).toBe(value);
   });
@@ -310,10 +313,14 @@ describe("planMerge convergence", () => {
   const receive = (replica: Replica, incoming: Delta[]) => {
     const latest = new Map<DeltaKey, string>();
     for (const d of replica.history) {
-      if (d.kind !== "set") continue;
+      if (d.kind !== "set") {
+        continue;
+      }
       const key = deltaKey(d);
       const current = latest.get(key);
-      if (current === undefined || current < d.timestamp) latest.set(key, d.timestamp);
+      if (current === undefined || current < d.timestamp) {
+        latest.set(key, d.timestamp);
+      }
     }
 
     const result = planMerge({
@@ -360,7 +367,7 @@ describe("planMerge convergence", () => {
   const orders: Record<string, Delta[]> = {
     forward: deltas,
     reverse: deltas.toReversed(),
-    interleaved: [5, 0, 7, 3, 6, 1, 4, 2].map((i) => deltas[i]!),
+    interleaved: [5, 0, 7, 3, 6, 1, 4, 2].map((i) => elementAt(deltas, i)),
   };
 
   const batchings: Record<string, (list: Delta[]) => Delta[][]> = {
@@ -382,7 +389,9 @@ describe("planMerge convergence", () => {
     for (const [batchingName, batch] of Object.entries(batchings)) {
       it(`reaches the same state for ${orderName} order, ${batchingName}`, () => {
         const replica = createReplica();
-        for (const incoming of batch(order)) receive(replica, incoming);
+        for (const incoming of batch(order)) {
+          receive(replica, incoming);
+        }
 
         expect(snapshot(replica)).toEqual(expected);
         expect(replica.history).toHaveLength(deltas.length);

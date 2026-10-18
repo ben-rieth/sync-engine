@@ -95,8 +95,9 @@ describe("createSyncClient", () => {
 
       const client = await create();
 
+      const savedNodeId = await read(storage, (tx) => tx.meta.get("nodeId"));
       expect(client.nodeId).toBe("node-a");
-      expect(await read(storage, (tx) => tx.meta.get("nodeId"))).toBe("node-a");
+      expect(savedNodeId).toBe("node-a");
     });
 
     it("reuses the saved node id on later starts", async () => {
@@ -124,7 +125,8 @@ describe("createSyncClient", () => {
       const { storage, create } = setup({ generateNodeId: () => "not valid!" });
 
       await expect(create()).rejects.toThrow("Invalid HLC nodeId");
-      expect(await read(storage, (tx) => tx.meta.get("nodeId"))).toBeUndefined();
+      const savedNodeId = await read(storage, (tx) => tx.meta.get("nodeId"));
+      expect(savedNodeId).toBeUndefined();
     });
 
     it("uses crypto.randomUUID by default", async () => {
@@ -141,8 +143,9 @@ describe("createSyncClient", () => {
 
       const id = await client.insert(TABLE, { name: "milk", price: 3 });
 
+      const stored = await row(storage, id);
       expect(id).toBe("id-1");
-      expect(await row(storage, id)).toEqual({ id, name: "milk", price: 3 });
+      expect(stored).toEqual({ id, name: "milk", price: 3 });
     });
 
     it("records one set delta per column", async () => {
@@ -182,9 +185,11 @@ describe("createSyncClient", () => {
         tag: null,
       });
 
+      const stored = await row(storage, id);
+      const deltas = await outbox(storage);
       expect(id).toBe("id-1");
-      expect(await row(storage, id)).toEqual({ id, name: "milk", tag: null });
-      expect(columns(await outbox(storage))).toEqual(["name", "tag"]);
+      expect(stored).toEqual({ id, name: "milk", tag: null });
+      expect(columns(deltas)).toEqual(["name", "tag"]);
     });
 
     it("stores nested JSON values", async () => {
@@ -193,7 +198,8 @@ describe("createSyncClient", () => {
 
       const id = await client.insert(TABLE, { tags: ["a", "b"], meta: { color: "red" } });
 
-      expect(await row(storage, id)).toEqual({ id, tags: ["a", "b"], meta: { color: "red" } });
+      const stored = await row(storage, id);
+      expect(stored).toEqual({ id, tags: ["a", "b"], meta: { color: "red" } });
     });
 
     it("uses a custom id when given", async () => {
@@ -202,8 +208,9 @@ describe("createSyncClient", () => {
 
       const id = await client.insert(TABLE, { value: "USD" }, { id: "currency" });
 
+      const stored = await row(storage, "currency");
       expect(id).toBe("currency");
-      expect(await row(storage, "currency")).toEqual({ id: "currency", value: "USD" });
+      expect(stored).toEqual({ id: "currency", value: "USD" });
     });
 
     it("allows the same id in two tables", async () => {
@@ -213,8 +220,10 @@ describe("createSyncClient", () => {
       await client.insert("a", { name: "first" }, { id: "shared" });
       await client.insert("b", { name: "second" }, { id: "shared" });
 
-      expect(await row(storage, "shared", "a")).toEqual({ id: "shared", name: "first" });
-      expect(await row(storage, "shared", "b")).toEqual({ id: "shared", name: "second" });
+      const first = await row(storage, "shared", "a");
+      const second = await row(storage, "shared", "b");
+      expect(first).toEqual({ id: "shared", name: "first" });
+      expect(second).toEqual({ id: "shared", name: "second" });
     });
 
     it("throws when the id belongs to an existing row", async () => {
@@ -225,8 +234,10 @@ describe("createSyncClient", () => {
       await expect(client.insert(TABLE, { name: "bread" }, { id: "x" })).rejects.toThrow(
         /already exists/,
       );
-      expect(await row(storage, "x")).toEqual({ id: "x", name: "milk" });
-      expect(await outbox(storage)).toHaveLength(1);
+      const stored = await row(storage, "x");
+      const deltas = await outbox(storage);
+      expect(stored).toEqual({ id: "x", name: "milk" });
+      expect(deltas).toHaveLength(1);
     });
 
     it("throws when the id belongs to a deleted row", async () => {
@@ -236,7 +247,8 @@ describe("createSyncClient", () => {
       await client.delete(TABLE, "x");
 
       await expect(client.insert(TABLE, { name: "bread" }, { id: "x" })).rejects.toThrow(/deleted/);
-      expect(await row(storage, "x")).toBeUndefined();
+      const stored = await row(storage, "x");
+      expect(stored).toBeUndefined();
     });
 
     it("only checks for deleted rows when the id is passed in", async () => {
@@ -271,8 +283,10 @@ describe("createSyncClient", () => {
       await expect(client.insert(TABLE, { id: "x", note: undefined })).rejects.toThrow(
         /no columns/,
       );
-      expect(await outbox(storage)).toEqual([]);
-      expect(await storedClock(storage)).toBeUndefined();
+      const deltas = await outbox(storage);
+      const clock = await storedClock(storage);
+      expect(deltas).toEqual([]);
+      expect(clock).toBeUndefined();
     });
   });
 
@@ -284,9 +298,10 @@ describe("createSyncClient", () => {
       const id = await client.insert(TABLE, JSON.parse('{"__proto__": "x", "a": 1}'));
 
       const stored = await row(storage, id);
+      const deltas = await outbox(storage);
       expect(Object.hasOwn(stored ?? {}, "__proto__")).toBe(true);
       expect(Object.getOwnPropertyDescriptor(stored, "__proto__")?.value).toBe("x");
-      expect(columns(await outbox(storage))).toContain("__proto__");
+      expect(columns(deltas)).toContain("__proto__");
     });
 
     it("updates a __proto__ column the row did not have", async () => {
@@ -297,8 +312,9 @@ describe("createSyncClient", () => {
       await client.update(TABLE, id, JSON.parse('{"__proto__": {}}'));
 
       const stored = await row(storage, id);
+      const deltas = await outbox(storage);
       expect(Object.getOwnPropertyDescriptor(stored, "__proto__")?.value).toEqual({});
-      expect(columns(await outbox(storage))).toEqual(["a", "__proto__"]);
+      expect(columns(deltas)).toEqual(["a", "__proto__"]);
     });
   });
 
@@ -311,9 +327,10 @@ describe("createSyncClient", () => {
       await client.update(TABLE, id, { name: "milk", price: 4 });
 
       const deltas = await outbox(storage);
+      const stored = await row(storage, id);
       expect(columns(deltas)).toEqual(["name", "price", "price"]);
       expect(deltas.at(-1)).toEqual(expect.objectContaining({ column: "price", value: 4 }));
-      expect(await row(storage, id)).toEqual({ id, name: "milk", price: 4 });
+      expect(stored).toEqual({ id, name: "milk", price: 4 });
     });
 
     it("treats equal nested values as unchanged", async () => {
@@ -323,7 +340,8 @@ describe("createSyncClient", () => {
 
       await client.update(TABLE, id, { tags: ["a"], meta: { color: "red" } });
 
-      expect(await outbox(storage)).toHaveLength(2);
+      const deltas = await outbox(storage);
+      expect(deltas).toHaveLength(2);
     });
 
     it("keeps columns that are not in the patch", async () => {
@@ -333,7 +351,8 @@ describe("createSyncClient", () => {
 
       await client.update(TABLE, id, { price: 4 });
 
-      expect(await row(storage, id)).toEqual({ id, name: "milk", price: 4 });
+      const stored = await row(storage, id);
+      expect(stored).toEqual({ id, name: "milk", price: 4 });
     });
 
     it("adds a column that the row did not have", async () => {
@@ -343,8 +362,10 @@ describe("createSyncClient", () => {
 
       await client.update(TABLE, id, { note: "fresh" });
 
-      expect(await row(storage, id)).toEqual({ id, name: "milk", note: "fresh" });
-      expect(columns(await outbox(storage))).toEqual(["name", "note"]);
+      const stored = await row(storage, id);
+      const deltas = await outbox(storage);
+      expect(stored).toEqual({ id, name: "milk", note: "fresh" });
+      expect(columns(deltas)).toEqual(["name", "note"]);
     });
 
     it("ignores id and undefined values but clears with null", async () => {
@@ -354,8 +375,10 @@ describe("createSyncClient", () => {
 
       await client.update(TABLE, id, { id: "other", name: undefined, note: null });
 
-      expect(await row(storage, id)).toEqual({ id, name: "milk", note: null });
-      expect(columns(await outbox(storage))).toEqual(["name", "note", "note"]);
+      const stored = await row(storage, id);
+      const deltas = await outbox(storage);
+      expect(stored).toEqual({ id, name: "milk", note: null });
+      expect(columns(deltas)).toEqual(["name", "note", "note"]);
     });
 
     it("does nothing when no column changed", async () => {
@@ -367,8 +390,10 @@ describe("createSyncClient", () => {
       await client.update(TABLE, id, { name: "milk" });
       await client.update(TABLE, id, {});
 
-      expect(await outbox(storage)).toHaveLength(1);
-      expect(await storedClock(storage)).toBe(clockBefore);
+      const deltas = await outbox(storage);
+      const clock = await storedClock(storage);
+      expect(deltas).toHaveLength(1);
+      expect(clock).toBe(clockBefore);
     });
 
     it("throws when the row does not exist", async () => {
@@ -376,8 +401,10 @@ describe("createSyncClient", () => {
       const client = await create();
 
       await expect(client.update(TABLE, "missing", { name: "milk" })).rejects.toThrow(/not found/);
-      expect(await row(storage, "missing")).toBeUndefined();
-      expect(await outbox(storage)).toEqual([]);
+      const stored = await row(storage, "missing");
+      const deltas = await outbox(storage);
+      expect(stored).toBeUndefined();
+      expect(deltas).toEqual([]);
     });
 
     it("throws for a deleted row and does not recreate it", async () => {
@@ -387,7 +414,8 @@ describe("createSyncClient", () => {
       await client.delete(TABLE, id);
 
       await expect(client.update(TABLE, id, { name: "bread" })).rejects.toThrow(/not found/);
-      expect(await row(storage, id)).toBeUndefined();
+      const stored = await row(storage, id);
+      expect(stored).toBeUndefined();
     });
 
     it("throws when another client deleted the row first", async () => {
@@ -399,7 +427,8 @@ describe("createSyncClient", () => {
       await second.delete(TABLE, id);
 
       await expect(first.update(TABLE, id, { name: "bread" })).rejects.toThrow(/not found/);
-      expect(await row(storage, id)).toBeUndefined();
+      const stored = await row(storage, id);
+      expect(stored).toBeUndefined();
     });
   });
 
@@ -411,8 +440,9 @@ describe("createSyncClient", () => {
 
       await client.delete(TABLE, id);
 
-      expect(await row(storage, id)).toBeUndefined();
+      const stored = await row(storage, id);
       const deltas = await outbox(storage);
+      expect(stored).toBeUndefined();
       expect(deltas.at(-1)).toEqual(
         expect.objectContaining({ kind: "delete", table: TABLE, objectId: id }),
       );
@@ -427,7 +457,8 @@ describe("createSyncClient", () => {
       await client.delete(TABLE, id);
       await client.delete(TABLE, id);
 
-      expect(columns(await outbox(storage))).toEqual(["name", "<delete>"]);
+      const deltas = await outbox(storage);
+      expect(columns(deltas)).toEqual(["name", "<delete>"]);
     });
 
     it("does nothing for a row that does not exist", async () => {
@@ -436,8 +467,10 @@ describe("createSyncClient", () => {
 
       await client.delete(TABLE, "missing");
 
-      expect(await outbox(storage)).toEqual([]);
-      expect(await storedClock(storage)).toBeUndefined();
+      const deltas = await outbox(storage);
+      const clock = await storedClock(storage);
+      expect(deltas).toEqual([]);
+      expect(clock).toBeUndefined();
     });
 
     it("only deletes the row in the given table", async () => {
@@ -448,8 +481,10 @@ describe("createSyncClient", () => {
 
       await client.delete("a", "shared");
 
-      expect(await row(storage, "shared", "a")).toBeUndefined();
-      expect(await row(storage, "shared", "b")).toEqual({ id: "shared", name: "second" });
+      const first = await row(storage, "shared", "a");
+      const second = await row(storage, "shared", "b");
+      expect(first).toBeUndefined();
+      expect(second).toEqual({ id: "shared", name: "second" });
     });
   });
 
@@ -471,13 +506,19 @@ describe("createSyncClient", () => {
       const client = await create();
 
       const id = await client.insert(TABLE, { name: "milk" });
-      expect(await storedClock(storage)).toBe((await outbox(storage)).at(-1)?.timestamp);
+      const clockAfterInsert = await storedClock(storage);
+      const deltasAfterInsert = await outbox(storage);
+      expect(clockAfterInsert).toBe(deltasAfterInsert.at(-1)?.timestamp);
 
       await client.update(TABLE, id, { name: "bread" });
-      expect(await storedClock(storage)).toBe((await outbox(storage)).at(-1)?.timestamp);
+      const clockAfterUpdate = await storedClock(storage);
+      const deltasAfterUpdate = await outbox(storage);
+      expect(clockAfterUpdate).toBe(deltasAfterUpdate.at(-1)?.timestamp);
 
       await client.delete(TABLE, id);
-      expect(await storedClock(storage)).toBe((await outbox(storage)).at(-1)?.timestamp);
+      const clockAfterDelete = await storedClock(storage);
+      const deltasAfterDelete = await outbox(storage);
+      expect(clockAfterDelete).toBe(deltasAfterDelete.at(-1)?.timestamp);
     });
 
     it("keeps increasing after a restart with the wall clock moved backwards", async () => {
@@ -491,7 +532,8 @@ describe("createSyncClient", () => {
       await restarted.update(TABLE, id, { name: "eggs" });
       await restarted.delete(TABLE, id);
 
-      expectUniqueAndIncreasing(timestamps(await outbox(storage)));
+      const deltas = await outbox(storage);
+      expectUniqueAndIncreasing(timestamps(deltas));
     });
 
     it("rejects writes when the stored clock is corrupt", async () => {
@@ -501,8 +543,10 @@ describe("createSyncClient", () => {
 
       await expect(client.insert(TABLE, { name: "milk" })).rejects.toThrow(/corrupt/);
 
-      expect(await outbox(storage)).toEqual([]);
-      expect(await row(storage, "id-1")).toBeUndefined();
+      const deltas = await outbox(storage);
+      const stored = await row(storage, "id-1");
+      expect(deltas).toEqual([]);
+      expect(stored).toBeUndefined();
     });
 
     it("orders interleaved writes from two clients on the same storage", async () => {
@@ -511,13 +555,13 @@ describe("createSyncClient", () => {
       const first = await create({ generateId: sequentialIds("a") });
       const second = await create({ generateId: sequentialIds("b") });
 
-      // Sequential on purpose: each write must see the one before it
-      /* oxlint-disable no-await-in-loop */
+      /* oxlint-disable no-await-in-loop -- each write must see the one before it */
       const issued: string[] = [];
       for (let i = 0; i < 20; i++) {
         const client = i % 3 === 0 ? second : first;
         await client.insert(TABLE, { n: i });
-        issued.push((await outbox(storage)).at(-1)?.timestamp ?? "");
+        const deltas = await outbox(storage);
+        issued.push(deltas.at(-1)?.timestamp ?? "");
       }
       /* oxlint-enable no-await-in-loop */
 
@@ -535,7 +579,8 @@ describe("createSyncClient", () => {
       }
       await Promise.all(writes);
 
-      const all = timestamps(await outbox(storage));
+      const deltas = await outbox(storage);
+      const all = timestamps(deltas);
       expect(all).toHaveLength(40);
       expect(new Set(all).size).toBe(40);
     });
@@ -560,10 +605,14 @@ describe("createSyncClient", () => {
         );
         await expect(broken.delete(TABLE, id)).rejects.toThrow(`${method} failed`);
 
-        expect(await row(storage, "y")).toBeUndefined();
-        expect(await row(storage, id)).toEqual({ id, name: "milk" });
-        expect(await outbox(storage)).toHaveLength(1);
-        expect(await storedClock(storage)).toBe(clockBefore);
+        const rejected = await row(storage, "y");
+        const stored = await row(storage, id);
+        const deltas = await outbox(storage);
+        const clock = await storedClock(storage);
+        expect(rejected).toBeUndefined();
+        expect(stored).toEqual({ id, name: "milk" });
+        expect(deltas).toHaveLength(1);
+        expect(clock).toBe(clockBefore);
       },
     );
 
@@ -582,10 +631,14 @@ describe("createSyncClient", () => {
         "rows.upsert failed",
       );
 
-      expect(await row(storage, "y")).toBeUndefined();
-      expect(await row(storage, id)).toEqual({ id, name: "milk" });
-      expect(await outbox(storage)).toHaveLength(1);
-      expect(await storedClock(storage)).toBe(clockBefore);
+      const rejected = await row(storage, "y");
+      const stored = await row(storage, id);
+      const deltas = await outbox(storage);
+      const clock = await storedClock(storage);
+      expect(rejected).toBeUndefined();
+      expect(stored).toEqual({ id, name: "milk" });
+      expect(deltas).toHaveLength(1);
+      expect(clock).toBe(clockBefore);
     });
 
     it("keeps working after a failed write", async () => {
@@ -596,7 +649,8 @@ describe("createSyncClient", () => {
       const client = await create();
       const id = await client.insert(TABLE, { name: "milk" });
 
-      expect(await row(storage, id)).toEqual({ id, name: "milk" });
+      const stored = await row(storage, id);
+      expect(stored).toEqual({ id, name: "milk" });
     });
 
     it("keeps timestamps increasing on the same client after a failed write", async () => {
@@ -611,9 +665,10 @@ describe("createSyncClient", () => {
       await client.insert(TABLE, { name: "eggs" });
 
       const deltas = await outbox(storage);
+      const clock = await storedClock(storage);
       expect(deltas).toHaveLength(2);
       expectUniqueAndIncreasing(timestamps(deltas));
-      expect(await storedClock(storage)).toBe(deltas.at(-1)?.timestamp);
+      expect(clock).toBe(deltas.at(-1)?.timestamp);
     });
   });
 });

@@ -7,6 +7,8 @@ const isObjectKey = (key: string): key is ObjectKey => key.startsWith("[");
 
 export const objectKey = ({ table, objectId }: ObjectRef): ObjectKey => {
   const key = JSON.stringify([table, objectId]);
-  if (!isObjectKey(key)) throw new Error("unreachable: JSON array encoding");
+  if (!isObjectKey(key)) {
+    throw new Error("unreachable: JSON array encoding");
+  }
   return key;
 };
