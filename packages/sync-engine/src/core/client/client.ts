@@ -2,6 +2,9 @@ import type { Delta } from "../delta";
 import { HybridLogicalClock } from "../hlc/clock";
 import { assertNodeId } from "../hlc/node-id";
 import { HLCTimestamp } from "../hlc/timestamp";
+import { ServerProtocolError } from "../server/server";
+import type { Transport } from "../server/transport";
+import { applyRemoteDeltas } from "./apply";
 import { defaultGenerateId } from "./id";
 import type { StorageAdapter, StorageTx } from "../storage";
 import { jsonEqual } from "#utils/json";
@@ -16,6 +19,12 @@ export type SyncClientOptions = {
   /** Generates this device's node id on first start. Defaults to `crypto.randomUUID()`. */
   generateNodeId?: () => string;
   now?: () => number;
+  /** How far ahead of local time a remote timestamp may be before pulling stops. Default 5 minutes. */
+  maxDriftMs?: number;
+  /** Connection to the sync server. Without one the client works offline only. */
+  transport?: Transport;
+  /** Maximum deltas requested per pull. Default 1000. */
+  pullLimit?: number;
 };
 
 export type InsertOptions = {
@@ -38,11 +47,21 @@ export type SyncClient = {
   update(table: string, objectId: string, patch: Record<string, unknown>): Promise<void>;
   /** Deletes the row and records a delete delta. Does nothing if the row does not exist. */
   delete(table: string, objectId: string): Promise<void>;
+  /**
+   * Pulls deltas from other nodes until the server has no more. Each page and its cursor commit
+   * together, so an interrupted sync resumes where it stopped.
+   *
+   * Throws without a transport, on transport errors, with `ClockDriftError` if a delta is too far
+   * in the future, and with `ServerProtocolError` if the server breaks the paging contract. Earlier
+   * pages stay merged; the failing page does not.
+   */
+  syncNow(): Promise<void>;
 };
 
 type WriteContext = {
   tx: StorageTx;
   tick: () => string;
+  receive: (timestamp: string) => void;
 };
 
 const columnsOf = (values: Record<string, unknown>): Record<string, unknown> =>
@@ -82,6 +101,10 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
   const { storage } = options;
   const generateId = options.generateId ?? defaultGenerateId;
   const generateNodeId = options.generateNodeId ?? defaultGenerateId;
+  const pullLimit = options.pullLimit ?? 1000;
+  if (!Number.isSafeInteger(pullLimit) || pullLimit < 1) {
+    throw new RangeError(`Invalid pullLimit: ${pullLimit}`);
+  }
 
   // readwrite so two tabs starting at once agree on a single node id
   const nodeId = await storage.transaction("readwrite", async (tx) => {
@@ -95,47 +118,86 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
     return saved;
   });
 
-  const clock = new HybridLogicalClock(nodeId, { now: options.now });
-  // Last stored clock string this client has observed or written; lets writes skip re-parsing it
-  let knownClock: string | undefined;
+  const clock = new HybridLogicalClock(nodeId, {
+    now: options.now,
+    maxDriftMs: options.maxDriftMs,
+  });
+  let lastSeenStoredClock: string | undefined;
+
+  // Other tabs and workers on the same storage advance the stored clock too
+  const mergeStoredClock = async (tx: StorageTx) => {
+    const stored = await tx.meta.get("clock");
+    if (stored === undefined || stored === lastSeenStoredClock) {
+      return;
+    }
+
+    const storedClock = HLCTimestamp.tryParse(stored);
+    if (!storedClock) {
+      throw new Error(`Stored clock is corrupt: ${stored}`);
+    }
+
+    clock.observe(storedClock);
+    lastSeenStoredClock = stored;
+  };
+
+  const saveClock = async (tx: StorageTx) => {
+    const next = clock.last().toString();
+    await tx.meta.set("clock", next);
+    lastSeenStoredClock = next;
+  };
 
   /**
-   * Runs `fn` in a readwrite transaction with the clock synced to storage.
-   *
-   * Before `fn`: merges the stored clock so writes from other tabs/workers on the same
-   * storage are ordered before ours. After `fn`: saves the clock if `fn` ticked, in the
-   * same transaction, so the row, the deltas and the clock commit or roll back together.
-   * `tick` must only be called inside `fn`.
+   * Runs `fn` in a readwrite transaction that saves the clock alongside `fn`'s writes, so rows,
+   * deltas and clock commit or roll back together. Call `tick` and `receive` only inside `fn`.
    */
   const write = <T>(fn: (ctx: WriteContext) => Promise<T>): Promise<T> =>
     storage.transaction("readwrite", async (tx) => {
-      const stored = await tx.meta.get("clock");
-      if (stored !== undefined && stored !== knownClock) {
-        const storedClock = HLCTimestamp.tryParse(stored);
-        if (!storedClock) {
-          throw new Error(`Stored clock is corrupt: ${stored}`);
-        }
+      await mergeStoredClock(tx);
 
-        clock.observe(storedClock);
-        knownClock = stored;
-      }
-
-      let ticked = false;
+      let clockChanged = false;
       const tick = () => {
-        ticked = true;
+        clockChanged = true;
         return clock.tick().toString();
       };
+      const receive = (timestamp: string) => {
+        clock.receive(HLCTimestamp.parse(timestamp));
+        clockChanged = true;
+      };
 
-      const result = await fn({ tx, tick });
+      const result = await fn({ tx, tick, receive });
 
-      if (ticked) {
-        const next = clock.last().toString();
-        await tx.meta.set("clock", next);
-        knownClock = next;
+      if (clockChanged) {
+        await saveClock(tx);
       }
 
       return result;
     });
+
+  /** Fetches and merges one page. Returns whether to keep pulling. */
+  const pullPage = async (transport: Transport): Promise<boolean> => {
+    // Fetch outside any transaction: awaiting the network inside one can commit it early (IndexedDB)
+    const storedCursor = await storage.transaction("read", (tx) => tx.meta.get("cursor"));
+    const page = await transport.pull({ cursor: storedCursor ?? null, nodeId, limit: pullLimit });
+    if (page.hasMore && (page.cursor === null || page.cursor === storedCursor)) {
+      throw new ServerProtocolError("Server reported more changes without advancing the cursor");
+    }
+
+    return write(async ({ tx, receive }) => {
+      // Another tab moved the cursor mid-fetch. Saving this page's cursor could move it backwards,
+      // so skip the page and refetch.
+      const currentCursor = await tx.meta.get("cursor");
+      if (currentCursor !== storedCursor) {
+        return true;
+      }
+
+      await applyRemoteDeltas(tx, page.deltas, receive);
+      if (page.cursor !== null) {
+        await tx.meta.set("cursor", page.cursor);
+      }
+
+      return page.hasMore;
+    });
+  };
 
   return {
     nodeId,
@@ -191,5 +253,17 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
         await tx.rows.delete(table, objectId);
         await tx.outbox.add([{ kind: "delete", timestamp: tick(), table, objectId }]);
       }),
+    syncNow: async () => {
+      const { transport } = options;
+      if (!transport) {
+        throw new Error("Cannot sync without a transport");
+      }
+
+      let hasMore = true;
+      while (hasMore) {
+        // oxlint-disable-next-line no-await-in-loop -- each page starts from the cursor the last one saved
+        hasMore = await pullPage(transport);
+      }
+    },
   };
 };

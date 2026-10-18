@@ -488,6 +488,16 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         );
       });
 
+      it("ignores extra delta fields on the refs", async () => {
+        await rw((tx) => tx.history.add([setDelta({ timestamp: ts(3) })]));
+        const full = { ...cell(), timestamp: ts(9), kind: "set", value: 1 };
+
+        const minimal = await ro((tx) => tx.latest([cell()]));
+        const result = await ro((tx) => tx.latest([full]));
+
+        expect(result).toEqual(minimal);
+      });
+
       it("omits cells with no deltas", async () => {
         await rw((tx) => tx.history.add([setDelta({ timestamp: ts(1) })]));
 
@@ -629,6 +639,16 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
         expect(deleted).toEqual(new Set([objectKey(obj("obj-1"))]));
         expect(empty).toEqual(new Set());
+      });
+
+      it("ignores extra delta fields on the refs", async () => {
+        await rw((tx) => tx.history.add([deleteDelta({ timestamp: ts(3) })]));
+        const full = { ...obj("obj-1"), timestamp: ts(9), kind: "delete" };
+
+        const minimal = await ro((tx) => tx.deleted([obj("obj-1")]));
+        const result = await ro((tx) => tx.deleted([full]));
+
+        expect(result).toEqual(minimal);
       });
 
       it("handles 5,000 objects", async () => {

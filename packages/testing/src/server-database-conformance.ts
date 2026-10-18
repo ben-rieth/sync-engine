@@ -85,9 +85,12 @@ export const runServerDatabaseConformance = (
         // oxlint-disable-next-line no-await-in-loop -- each page depends on the previous cursor
         page = await pull(cursor, { userId, excludeNodeId, limit });
         expect(page.deltas.length).toBeLessThanOrEqual(limit);
-        // hasMore promises something to deliver, so a client following it never spins on empty pages
+        // hasMore promises something to deliver from a new position, so a client following it never
+        // spins on empty pages or refetches the same one
         if (page.hasMore) {
           expect(page.deltas.length).toBeGreaterThan(0);
+          expect(page.cursor).not.toBeNull();
+          expect(page.cursor).not.toBe(cursor);
         }
         seen.push(...page.deltas);
         cursor = page.cursor;

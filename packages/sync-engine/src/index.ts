@@ -26,5 +26,10 @@ export {
 export { objectKey, type ObjectKey, type ObjectRef } from "./core/object";
 
 export type { MetaKey, StorageAdapter, StorageTx, TransactionMode } from "./core/storage";
-export type { PullRequest, PullResult, ServerDatabaseAdapter } from "./core/server/server";
+export {
+  ServerProtocolError,
+  type PullRequest,
+  type PullResult,
+  type ServerDatabaseAdapter,
+} from "./core/server/server";
 export type { Transport } from "./core/server/transport";
