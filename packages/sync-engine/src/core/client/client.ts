@@ -4,6 +4,7 @@ import { assertNodeId } from "../hlc/node-id";
 import { HLCTimestamp } from "../hlc/timestamp";
 import { defaultGenerateId } from "./id";
 import type { StorageAdapter, StorageTx } from "../storage";
+import { jsonEqual } from "#utils/json";
 
 export type SyncClientOptions = {
   storage: StorageAdapter;
@@ -43,9 +44,6 @@ type WriteContext = {
   tx: StorageTx;
   tick: () => string;
 };
-
-const jsonEqual = (a: unknown, b: unknown): boolean =>
-  a === b || JSON.stringify(a) === JSON.stringify(b);
 
 const columnsOf = (values: Record<string, unknown>): Record<string, unknown> =>
   Object.fromEntries(

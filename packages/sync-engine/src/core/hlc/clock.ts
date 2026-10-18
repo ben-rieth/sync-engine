@@ -21,6 +21,26 @@ export class ClockDriftError extends Error {
   }
 }
 
+export const DEFAULT_MAX_DRIFT_MS: number = 5 * 60_000;
+
+/** Throws a `RangeError` naming `owner` if `maxDriftMs` is negative or NaN. */
+export const assertMaxDriftMs = (maxDriftMs: number, owner: string): void => {
+  if (maxDriftMs < 0 || Number.isNaN(maxDriftMs)) {
+    throw new RangeError(`Invalid ${owner} maxDriftMs: ${maxDriftMs}`);
+  }
+};
+
+/** Throws `ClockDriftError` if `remote` is more than `maxDriftMs` ahead of `wallTime`. */
+export const assertWithinDrift = (
+  remote: HLCTimestamp,
+  wallTime: number,
+  maxDriftMs: number,
+): void => {
+  if (remote.physicalTime - wallTime > maxDriftMs) {
+    throw new ClockDriftError(remote, wallTime);
+  }
+};
+
 export class HybridLogicalClock {
   readonly nodeId: string;
   #physical: number;
@@ -30,13 +50,14 @@ export class HybridLogicalClock {
 
   constructor(
     nodeId: string,
-    { last = null, now = Date.now, maxDriftMs = 5 * 60_000 }: HybridLogicalClockOptions = {},
+    {
+      last = null,
+      now = Date.now,
+      maxDriftMs = DEFAULT_MAX_DRIFT_MS,
+    }: HybridLogicalClockOptions = {},
   ) {
     assertNodeId(nodeId);
-
-    if (maxDriftMs < 0 || Number.isNaN(maxDriftMs)) {
-      throw new RangeError(`Invalid HLC maxDriftMs: ${maxDriftMs}`);
-    }
+    assertMaxDriftMs(maxDriftMs, "HLC");
 
     this.nodeId = nodeId;
     this.#physical = last?.physicalTime ?? 0;
@@ -70,10 +91,7 @@ export class HybridLogicalClock {
    */
   receive(remote: HLCTimestamp): HLCTimestamp {
     const wallTime = this.#now();
-
-    if (remote.physicalTime - wallTime > this.#maxDriftMs) {
-      throw new ClockDriftError(remote, wallTime);
-    }
+    assertWithinDrift(remote, wallTime, this.#maxDriftMs);
 
     const physical = Math.max(wallTime, this.#physical, remote.physicalTime);
     let logical = 0;

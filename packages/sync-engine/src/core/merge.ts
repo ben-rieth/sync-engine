@@ -1,4 +1,5 @@
 import { deltaKey, type Delta, type DeltaKey } from "./delta";
+import { compareTimestamps } from "./hlc/timestamp";
 import { objectKey, type ObjectKey } from "./object";
 
 type RowWrite =
@@ -26,9 +27,7 @@ type MergePlan = {
 };
 
 export const planMerge = (input: MergeInput): MergePlan => {
-  const sorted = input.incoming.toSorted((a, b) =>
-    a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
-  );
+  const sorted = input.incoming.toSorted((a, b) => compareTimestamps(a.timestamp, b.timestamp));
 
   const writes = new Map<ObjectKey, RowWrite>();
   const historyAdds: Delta[] = [];

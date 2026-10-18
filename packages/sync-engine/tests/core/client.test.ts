@@ -4,6 +4,7 @@ import { createSyncClient, type SyncClientOptions } from "#core/client/client";
 import type { Delta } from "#core/delta";
 import { HLCTimestamp } from "#core/hlc/timestamp";
 import type { StorageAdapter, StorageTx } from "#core/storage";
+import { timestamps } from "../helpers";
 
 const TABLE = "items";
 const START = 1_700_000_000_000;
@@ -51,8 +52,6 @@ const storedClock = (storage: StorageAdapter) => read(storage, (tx) => tx.meta.g
 
 const columns = (deltas: Delta[]) =>
   deltas.map((delta) => (delta.kind === "set" ? delta.column : "<delete>"));
-
-const timestamps = (deltas: Delta[]) => deltas.map((delta) => delta.timestamp);
 
 const expectUniqueAndIncreasing = (values: string[]) => {
   expect(new Set(values).size).toBe(values.length);

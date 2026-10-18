@@ -1,6 +1,8 @@
 import { type DeltaKey, deltaKey, type Delta } from "#core/delta";
+import { compareTimestamps } from "#core/hlc/timestamp";
 import { objectKey, type ObjectKey } from "#core/object";
 import type { MetaKey, StorageAdapter, StorageTx, TransactionMode } from "#core/storage";
+import { cloneJson } from "#utils/json";
 
 type MemoryState = {
   rows: Map<string, Map<string, Record<string, unknown>>>;
@@ -9,17 +11,12 @@ type MemoryState = {
   meta: Map<MetaKey, string>;
 };
 
-const compareStrings = (a: string, b: string): -1 | 0 | 1 => (a < b ? -1 : a > b ? 1 : 0);
-
 const snapshotState = (s: MemoryState): MemoryState => ({
   rows: new Map([...s.rows].map(([table, rows]) => [table, new Map(rows)])),
   outbox: new Map(s.outbox),
   history: new Map(s.history),
   meta: new Map(s.meta),
 });
-
-const cloneJson = <T>(value: T): T =>
-  value === undefined ? value : JSON.parse(JSON.stringify(value));
 
 const tableRows = (state: MemoryState, table: string) => {
   let rows = state.rows.get(table);
@@ -65,7 +62,7 @@ const createTx = (getState: () => MemoryState, mode: TransactionMode): StorageTx
       },
       list: async (limit) => {
         const sorted = [...getState().outbox.values()].toSorted((a, b) =>
-          compareStrings(a.timestamp, b.timestamp),
+          compareTimestamps(a.timestamp, b.timestamp),
         );
 
         return cloneJson(sorted.slice(0, limit));

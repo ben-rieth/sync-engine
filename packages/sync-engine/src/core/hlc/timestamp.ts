@@ -8,6 +8,9 @@ const PATTERN = /^(\d{15})\.(\d{4})\.(.+)$/;
 
 const pad = (value: number, width: number) => value.toString().padStart(width, "0");
 
+/** Orders HLC strings. Their fields are zero-padded, so string order is timestamp order. */
+export const compareTimestamps = (a: string, b: string): -1 | 0 | 1 => (a < b ? -1 : a > b ? 1 : 0);
+
 export class HLCTimestamp {
   readonly physicalTime: number;
   readonly logicalTime: number;
