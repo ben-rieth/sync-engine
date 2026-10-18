@@ -4,7 +4,7 @@ import { HLCTimestamp, MAX_LOGICAL, MAX_PHYSICAL } from "#core/hlc/timestamp";
 const ts = (physical: number, logical: number, nodeId: string) =>
   new HLCTimestamp(physical, logical, nodeId);
 
-// Hand-picked timestamps covering boundaries and tie-breaking edge cases.
+// Boundaries and tie-breaking edge cases
 const samples = [
   ts(0, 0, "a"),
   ts(0, 0, "b"),
@@ -27,7 +27,6 @@ const samples = [
 
 const sampleCases = samples.map((t) => ({ name: t.toString(), t }));
 
-// Every ordered pair of samples, labelled so a failing assertion names its pair.
 const pairs = samples.flatMap((a) =>
   samples.map((b) => ({ label: `${a.toString()} vs ${b.toString()}`, a, b })),
 );

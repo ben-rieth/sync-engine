@@ -1,5 +1,5 @@
-// The ServerDatabaseAdapter contract is covered by runServerDatabaseConformance in packages/testing.
-// These tests pin what is specific to the memory adapter: cursor values and the injectable clock.
+// The contract is covered by runServerDatabaseConformance in packages/testing.
+// These pin memory-adapter specifics: cursor values and the injectable clock.
 import { describe, expect, it } from "vitest";
 import { serverMemoryDatabase } from "#adapters/server-memory";
 import { ClockDriftError } from "#core/hlc/clock";

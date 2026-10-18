@@ -49,19 +49,17 @@ export class HLCTimestamp {
       return a.logicalTime < b.logicalTime ? -1 : 1;
     }
 
-    // If physical and logical times are equal, compare node IDs for deterministic ordering
     if (a.nodeId !== b.nodeId) {
       return a.nodeId < b.nodeId ? -1 : 1;
     }
 
-    return 0; // Completely equal
+    return 0;
   }
 
   compare(other: HLCTimestamp): number {
     return HLCTimestamp.compare(this, other);
   }
 
-  // '000000000000000.0000.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
   toString(): string {
     return `${pad(this.physicalTime, 15)}.${pad(this.logicalTime, 4)}.${this.nodeId}`;
   }

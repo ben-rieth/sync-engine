@@ -23,14 +23,12 @@ export class ClockDriftError extends Error {
 
 export const DEFAULT_MAX_DRIFT_MS: number = 5 * 60_000;
 
-/** Throws a `RangeError` naming `owner` if `maxDriftMs` is negative or NaN. */
 export const assertMaxDriftMs = (maxDriftMs: number, owner: string): void => {
   if (maxDriftMs < 0 || Number.isNaN(maxDriftMs)) {
     throw new RangeError(`Invalid ${owner} maxDriftMs: ${maxDriftMs}`);
   }
 };
 
-/** Throws `ClockDriftError` if `remote` is more than `maxDriftMs` ahead of `wallTime`. */
 export const assertWithinDrift = (
   remote: HLCTimestamp,
   wallTime: number,
@@ -79,15 +77,10 @@ export class HybridLogicalClock {
   }
 
   /**
-   * Merge a timestamp issued by another node's clock, such as one attached to
-   * a change from the server. The result is greater than both this clock's
-   * last value and the remote one.
+   * Merges another node's timestamp. The result exceeds both it and this clock's last value.
+   * For this node's own stored clock, use observe().
    *
-   * Only for other nodes' timestamps. To catch up to this node's own stored
-   * clock, use observe().
-   *
-   * @throws ClockDriftError if the remote is more than maxDriftMs ahead of
-   * local wall time. The clock is left unchanged.
+   * @throws ClockDriftError, leaving the clock unchanged, if `remote` is over maxDriftMs ahead.
    */
   receive(remote: HLCTimestamp): HLCTimestamp {
     const wallTime = this.#now();
@@ -109,13 +102,9 @@ export class HybridLogicalClock {
   }
 
   /**
-   * Catch up to a timestamp this node has already issued or seen (e.g. the
-   * shared stored clock), without counting it as a new event. Lets several
-   * contexts with the same nodeId (tabs, workers) act as one clock.
-   *
-   * Monotonic and idempotent. No drift check: the value was already
-   * validated by tick()/receive(). Not for other nodes' timestamps; use
-   * receive() for those.
+   * Catches up to a timestamp this node already issued, without counting a new event, so tabs
+   * and workers sharing a nodeId act as one clock. No drift check: tick()/receive() already
+   * validated it. For other nodes' timestamps, use receive().
    */
   observe(other: HLCTimestamp): void {
     if (
@@ -139,13 +128,13 @@ export class HybridLogicalClock {
     let nextPhysical = physical;
     let nextLogical = logical;
 
-    // if logical counter gets exhausted, borrow from the future
+    // Logical counter exhausted: borrow from the future
     if (nextLogical > MAX_LOGICAL) {
       nextPhysical += 1;
       nextLogical = 0;
     }
 
-    // validate before mutating so a bad wall time can't corrupt the clock
+    // Construct first so an invalid wall time throws before the clock changes
     const next = new HLCTimestamp(nextPhysical, nextLogical, this.nodeId);
     this.#physical = next.physicalTime;
     this.#logical = next.logicalTime;

@@ -9,7 +9,6 @@ import { timestamps } from "../helpers";
 const TABLE = "items";
 const START = 1_700_000_000_000;
 
-// Deterministic ids: "id-1", "id-2", ...
 const sequentialIds = (prefix = "id") => {
   let next = 0;
   return () => {
@@ -18,7 +17,6 @@ const sequentialIds = (prefix = "id") => {
   };
 };
 
-// Storage plus a wall clock the test controls through `setTime`.
 const setup = (overrides: Partial<SyncClientOptions> = {}) => {
   const storage = clientMemoryStorage();
   let time = START;
@@ -64,7 +62,7 @@ const expectUniqueAndIncreasing = (values: string[]) => {
 
 type FailingMethod = "rows.upsert" | "outbox.add" | "meta.set";
 
-// Wraps an adapter so a chosen StorageTx method throws while `active()` is true, to test rollback.
+// Makes `method` throw while `active()` is true, to test rollback
 const failing = (
   inner: StorageAdapter,
   method: FailingMethod,
@@ -551,7 +549,7 @@ describe("createSyncClient", () => {
 
     it("orders interleaved writes from two clients on the same storage", async () => {
       const { storage, create } = setup();
-      // Separate id sequences so the two clients never pick the same row id
+      // Separate prefixes so the clients never pick the same row id
       const first = await create({ generateId: sequentialIds("a") });
       const second = await create({ generateId: sequentialIds("b") });
 

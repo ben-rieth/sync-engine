@@ -10,11 +10,11 @@ import {
 export type ServerDatabaseConformanceOptions = {
   /** Return a fresh, empty adapter. Called before every test. */
   create: () => ServerDatabaseAdapter | Promise<ServerDatabaseAdapter>;
-  /** Optional cleanup after each test. */
+  /** Called after each test. */
   destroy?: (adapter: ServerDatabaseAdapter) => void | Promise<void>;
   /** The max clock drift the adapter was created with. Default 5 minutes. */
   maxDriftMs?: number;
-  /** Cursors the adapter must reject, since cursor formats are adapter-specific. Default ["not-a-cursor"]. */
+  /** Cursors the adapter must reject; formats are adapter-specific. Default ["not-a-cursor"]. */
   invalidCursors?: readonly string[];
 };
 
@@ -33,9 +33,8 @@ const delta = (physical: number, node = "node-a", value: unknown = physical): De
 const timestamps = (deltas: Delta[]) => deltas.map((d) => d.timestamp);
 
 /**
- * Runs the black-box `ServerDatabaseAdapter` contract tests against adapters built by
- * `options.create`. Cursors are treated as opaque: tests only feed back cursors the adapter
- * returned, and never assert their values.
+ * Runs the black-box `ServerDatabaseAdapter` contract tests. Cursors are opaque: tests only
+ * feed back cursors the adapter returned and never assert their values.
  */
 export const runServerDatabaseConformance = (
   name: string,
@@ -320,8 +319,7 @@ export const runServerDatabaseConformance = (
         const writers = Promise.all(all.map((d) => push([d]))).finally(() => {
           writing = false;
         });
-        // Keep draining while the writers run. waitFor polls on a timer, so writers that wait on
-        // timers or I/O get to run between drains.
+        // waitFor polls on a timer, so writers awaiting timers or I/O run between drains
         await vi.waitFor(
           async () => {
             await drain();

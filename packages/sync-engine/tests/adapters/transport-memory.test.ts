@@ -5,8 +5,7 @@ import type { Delta } from "#core/delta";
 import type { PullRequest, ServerDatabaseAdapter } from "#core/server/server";
 import { delta, timestamps } from "../helpers";
 
-// A server that records what it was called with and hands out shared objects,
-// so the tests can see whether the transport copies.
+// Records calls and returns shared objects, so tests can see whether the transport copies
 const spyServer = () => {
   const pushes: { userId: string; deltas: Delta[] }[] = [];
   const pulls: { userId: string; request: PullRequest }[] = [];

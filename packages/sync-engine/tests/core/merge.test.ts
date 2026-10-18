@@ -8,7 +8,7 @@ import { elementAt } from "../helpers";
 const TABLE = "todos";
 const OBJECT = "obj-1";
 
-// Timestamps are compared as strings, so zero-padding keeps them ordered.
+// Zero-padded because timestamps are compared as strings
 const t = (n: number) => `t${String(n).padStart(4, "0")}`;
 
 const delta = (
@@ -301,8 +301,7 @@ describe("planMerge", () => {
 describe("planMerge convergence", () => {
   type Row = { table: string; objectId: string; values: Record<string, unknown> };
 
-  // Minimal replica: rows plus delta history. `latest` and known timestamps are
-  // derived from history rather than stored.
+  // `latest` and known timestamps are derived from history rather than stored
   const createReplica = () => ({
     rows: new Map<ObjectKey, Row>(),
     deleted: new Set<ObjectKey>(),

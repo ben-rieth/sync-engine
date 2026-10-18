@@ -10,7 +10,6 @@ const DEFAULT_MAX_DRIFT_MS = 5 * 60_000;
 const ts = (physical: number, logical: number, nodeId = NODE) =>
   new HLCTimestamp(physical, logical, nodeId);
 
-// A clock whose wall time is controlled by the test through `setTime`.
 const createClock = ({
   time = 1000,
   last = null as HLCTimestamp | null,
@@ -58,8 +57,7 @@ const expectIncreasing = (timestamps: HLCTimestamp[]) => {
   }
 };
 
-// Interleaves ticks from two tabs sharing a nodeId, occasionally advancing
-// time, and returns every issued timestamp.
+// Interleaves ticks from two tabs sharing a nodeId and returns every issued timestamp
 const runTabs = (shareState: boolean) => {
   let wallTime = 1000;
   const now = () => wallTime;
@@ -69,7 +67,7 @@ const runTabs = (shareState: boolean) => {
   const issued: HLCTimestamp[] = [];
 
   for (let i = 0; i < 25_000; i++) {
-    // Uneven pattern so each tab sometimes ticks several times in a row.
+    // Uneven so each tab sometimes ticks several times in a row
     const tab = i % 7 < 4 ? firstTab : secondTab;
     if (i % 50 === 0) {
       wallTime++;

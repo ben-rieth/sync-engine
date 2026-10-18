@@ -13,12 +13,9 @@ import {
 export type StorageConformanceOptions = {
   /** Return a fresh, empty adapter. Called before every test. */
   create: () => StorageAdapter | Promise<StorageAdapter>;
-  /** Optional cleanup after each test. */
+  /** Called after each test. */
   destroy?: (adapter: StorageAdapter) => void | Promise<void>;
-  /**
-   * App tables the adapter was created with, used by the `tx.rows` tests. Not passed to
-   * `transaction()`. Default ["items", "other"].
-   */
+  /** App tables the adapter was created with, for the `tx.rows` tests. Default ["items", "other"]. */
   tables?: readonly [string, string];
 };
 
@@ -31,8 +28,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
 /**
- * Runs the black-box `StorageAdapter` contract tests against adapters built by `options.create`.
- * Tests only use `adapter.transaction` and `StorageTx`, and only await `tx` methods inside
+ * Runs the black-box `StorageAdapter` contract tests. Only `tx` methods are awaited inside
  * transactions, so the suite works for IndexedDB-backed adapters too.
  */
 export const runStorageConformance = (name: string, options: StorageConformanceOptions): void => {

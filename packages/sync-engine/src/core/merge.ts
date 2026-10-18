@@ -7,16 +7,13 @@ type RowWrite =
   | { kind: "delete"; table: string; objectId: string };
 
 type MergeInput = {
-  // deltas from a remote peer, in any order; may include deltas already known locally
+  // Any order; may include already-known deltas
   incoming: Delta[];
-  // newest timestamp in local history for each cell (table, objectId, column);
-  // must cover all local history, not just winning writes
+  // Newest local timestamp per cell, over all history, not just winning writes
   latest: Map<DeltaKey, string>;
-  // objects deleted locally; deletes are final, so later deltas for these are
-  // recorded in history but never applied
+  // Deletes are final: later deltas for these are recorded in history but never applied
   deleted: Set<ObjectKey>;
-  // timestamps of every delta in local history. Deduplication is by timestamp
-  // alone, which relies on each delta getting its own clock tick()
+  // Every local history timestamp. Dedup is by timestamp alone
   knownTimestamps: Set<string>;
 };
 

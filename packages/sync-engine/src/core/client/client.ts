@@ -10,7 +10,7 @@ export type SyncClientOptions = {
   storage: StorageAdapter;
   /**
    * Generates ids for new rows. Defaults to `crypto.randomUUID()`.
-   * Must never return the id of a deleted row: generated ids are not checked against deletes.
+   * Must never return a deleted row's id: generated ids are not checked against deletes.
    */
   generateId?: () => string;
   /** Generates this device's node id on first start. Defaults to `crypto.randomUUID()`. */
@@ -50,19 +50,18 @@ const columnsOf = (values: Record<string, unknown>): Record<string, unknown> =>
     Object.entries(values).filter(([column, value]) => column !== "id" && value !== undefined),
   );
 
-// Columns from `patch` whose values differ from what `current` already holds
+const ownValue = (record: Record<string, unknown>, key: string): unknown =>
+  Object.hasOwn(record, key) ? record[key] : undefined;
+
 const changedColumns = (
   current: Record<string, unknown>,
   patch: Record<string, unknown>,
-): Record<string, unknown> => {
-  // hasOwn guard keeps inherited props like `toString` from counting as existing values
-  const isChanged = ([column, value]: [string, unknown]) => {
-    const existing = Object.hasOwn(current, column) ? current[column] : undefined;
-    return !jsonEqual(value, existing);
-  };
-
-  return Object.fromEntries(Object.entries(columnsOf(patch)).filter(isChanged));
-};
+): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(columnsOf(patch)).filter(
+      ([column, value]) => !jsonEqual(value, ownValue(current, column)),
+    ),
+  );
 
 const setDeltas = (
   table: string,
@@ -142,15 +141,15 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
     nodeId,
     insert: (table, values, insertOptions) =>
       write(async ({ tx, tick }) => {
-        const objectId = insertOptions?.id ?? generateId();
+        const suppliedId = insertOptions?.id;
+        const objectId = suppliedId ?? generateId();
 
         const current = await tx.rows.get(table, objectId);
         if (current) {
           throw new Error(`Row ${objectId} already exists in ${table}`);
         }
 
-        // Generated ids are fresh, so only caller-supplied ids can belong to a deleted row
-        if (insertOptions?.id !== undefined) {
+        if (suppliedId !== undefined) {
           const deletedKeys = await tx.deleted([{ table, objectId }]);
           if (deletedKeys.size > 0) {
             throw new Error(`Row ${objectId} in ${table} was deleted and its id cannot be reused`);

@@ -8,10 +8,8 @@ export type MemoryTransport = Transport & {
 };
 
 /**
- * Connects a client straight to a `ServerDatabaseAdapter` in the same process, for tests and demos.
- *
- * `userId` is fixed when the transport is created, the way a real server reads it from the session.
- * Requests and responses are copied in both directions, so neither side can share objects with the other.
+ * Connects a client to an in-process `ServerDatabaseAdapter`, for tests and demos. `userId` is
+ * fixed, as a real server reads it from the session. Requests and responses are deep-copied.
  */
 export const memoryTransport = (server: ServerDatabaseAdapter, userId: string): MemoryTransport => {
   const transport: MemoryTransport = {

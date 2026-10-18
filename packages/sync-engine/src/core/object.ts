@@ -1,6 +1,5 @@
-export type ObjectKey = string & { readonly __brand: "ObjectKey" }; // JSON of [table, objectId]
+export type ObjectKey = string & { readonly __brand: "ObjectKey" };
 
-/** Identifies a single object in one table. A `Delta` is a valid `ObjectRef`. */
 export type ObjectRef = { table: string; objectId: string };
 
 const isObjectKey = (key: string): key is ObjectKey => key.startsWith("[");
