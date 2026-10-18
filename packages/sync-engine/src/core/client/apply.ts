@@ -1,7 +1,12 @@
-import type { Delta } from "../delta";
+import { deltaKey, type Delta } from "../delta";
 import { HLCTimestamp } from "../hlc/timestamp";
 import { planMerge } from "../merge";
+import { objectKey } from "../object";
 import type { StorageTx } from "../storage";
+
+const uniqueBy = <T>(items: T[], key: (item: T) => string): T[] => [
+  ...new Map(items.map((item) => [key(item), item])).values(),
+];
 
 /**
  * Merges remote deltas into `tx`: applies winning values to rows, records new deltas in history,
@@ -21,12 +26,17 @@ export const applyRemoteDeltas = async (
     // Merge orders and dedups by raw string, so reject malformed timestamps
     HLCTimestamp.parse(delta.timestamp);
   }
-  const cells = deltas.filter((delta) => delta.kind === "set");
+  // A page often holds many deltas per row and cell, so look each up once
+  const cells = uniqueBy(
+    deltas.filter((delta) => delta.kind === "set"),
+    deltaKey,
+  );
+  const objects = uniqueBy(deltas, objectKey);
 
   const [knownTimestamps, latest, deleted] = await Promise.all([
     tx.history.has(deltas.map((delta) => delta.timestamp)),
     tx.latest(cells),
-    tx.deleted(deltas),
+    tx.deleted(objects),
   ]);
 
   const plan = planMerge({ incoming: deltas, latest, deleted, knownTimestamps });

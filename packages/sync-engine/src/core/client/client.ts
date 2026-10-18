@@ -2,7 +2,7 @@ import type { Delta } from "../delta";
 import { HybridLogicalClock } from "../hlc/clock";
 import { assertNodeId } from "../hlc/node-id";
 import { HLCTimestamp } from "../hlc/timestamp";
-import { ServerProtocolError } from "../server/server";
+import { ServerProtocolError, type PullResult } from "../server/server";
 import type { Transport } from "../server/transport";
 import { applyRemoteDeltas } from "./apply";
 import { defaultGenerateId } from "./id";
@@ -25,6 +25,8 @@ export type SyncClientOptions = {
   transport?: Transport;
   /** Maximum deltas requested per pull. Default 1000. */
   pullLimit?: number;
+  /** Maximum deltas sent per push. Default 500. */
+  pushBatchSize?: number;
 };
 
 export type InsertOptions = {
@@ -48,15 +50,20 @@ export type SyncClient = {
   /** Deletes the row and records a delete delta. Does nothing if the row does not exist. */
   delete(table: string, objectId: string): Promise<void>;
   /**
-   * Pulls deltas from other nodes until the server has no more. Each page and its cursor commit
-   * together, so an interrupted sync resumes where it stopped.
+   * Pulls deltas from other nodes until the server has no more, then pushes the outbox until it is
+   * empty. Each pulled page and its cursor commit together, so an interrupted sync resumes where it
+   * stopped. Pushed deltas move to history only after the server accepts them; a push that fails or
+   * loses its reply is sent again by the next sync, and the server ignores the repeat.
    *
    * Throws without a transport, on transport errors, with `ClockDriftError` if a delta is too far
    * in the future, and with `ServerProtocolError` if the server breaks the paging contract. Earlier
-   * pages stay merged; the failing page does not.
+   * pages and batches stay done; the failing one does not. Nothing is pushed if the pull fails.
    */
   syncNow(): Promise<void>;
 };
+
+type Fetched = { from: string | undefined; page: PullResult };
+type Saved = { applied: boolean; cursor: string | undefined };
 
 type WriteContext = {
   tx: StorageTx;
@@ -104,6 +111,10 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
   const pullLimit = options.pullLimit ?? 1000;
   if (!Number.isSafeInteger(pullLimit) || pullLimit < 1) {
     throw new RangeError(`Invalid pullLimit: ${pullLimit}`);
+  }
+  const pushBatchSize = options.pushBatchSize ?? 500;
+  if (!Number.isSafeInteger(pushBatchSize) || pushBatchSize < 1) {
+    throw new RangeError(`Invalid pushBatchSize: ${pushBatchSize}`);
   }
 
   // readwrite so two tabs starting at once agree on a single node id
@@ -173,21 +184,24 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
       return result;
     });
 
-  /** Fetches and merges one page. Returns whether to keep pulling. */
-  const pullPage = async (transport: Transport): Promise<boolean> => {
-    // Fetch outside any transaction: awaiting the network inside one can commit it early (IndexedDB)
-    const storedCursor = await storage.transaction("read", (tx) => tx.meta.get("cursor"));
-    const page = await transport.pull({ cursor: storedCursor ?? null, nodeId, limit: pullLimit });
-    if (page.hasMore && (page.cursor === null || page.cursor === storedCursor)) {
+  // Fetch outside any transaction: awaiting the network inside one can commit it early (IndexedDB)
+  const fetchPage = async (transport: Transport, from: string | undefined): Promise<Fetched> => {
+    const page = await transport.pull({ cursor: from ?? null, nodeId, limit: pullLimit });
+    if (page.hasMore && (page.cursor === null || page.cursor === from)) {
       throw new ServerProtocolError("Server reported more changes without advancing the cursor");
     }
 
-    return write(async ({ tx, receive }) => {
+    return { from, page };
+  };
+
+  /** Merges a fetched page if the stored cursor still matches the one it was fetched from. */
+  const savePage = ({ from, page }: Fetched): Promise<Saved> =>
+    write(async ({ tx, receive }) => {
       // Another tab moved the cursor mid-fetch. Saving this page's cursor could move it backwards,
       // so skip the page and refetch.
-      const currentCursor = await tx.meta.get("cursor");
-      if (currentCursor !== storedCursor) {
-        return true;
+      const current = await tx.meta.get("cursor");
+      if (current !== from) {
+        return { applied: false, cursor: current };
       }
 
       await applyRemoteDeltas(tx, page.deltas, receive);
@@ -195,8 +209,56 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
         await tx.meta.set("cursor", page.cursor);
       }
 
-      return page.hasMore;
+      return { applied: true, cursor: page.cursor ?? from };
     });
+
+  const pullAll = async (transport: Transport): Promise<void> => {
+    const start = await storage.transaction("read", (tx) => tx.meta.get("cursor"));
+    let pending = fetchPage(transport, start);
+
+    for (;;) {
+      // oxlint-disable-next-line no-await-in-loop -- each page starts from the cursor the last one returned
+      const fetched = await pending;
+
+      // Fetch the next page while this one saves, so the network overlaps the write
+      const next = fetched.page.hasMore
+        ? fetchPage(transport, fetched.page.cursor ?? undefined)
+        : undefined;
+      // Mark as handled: if the save throws, nothing awaits `next`
+      next?.catch(() => {});
+
+      // oxlint-disable-next-line no-await-in-loop -- pages save in order so the cursor only moves forward
+      const saved = await savePage(fetched);
+      if (!saved.applied) {
+        // `next` was fetched from the stale cursor
+        pending = fetchPage(transport, saved.cursor);
+        continue;
+      }
+      if (!next) {
+        return;
+      }
+
+      pending = next;
+    }
+  };
+
+  /** Pushes the oldest batch from the outbox. Returns whether there was anything to push. */
+  const pushBatch = async (transport: Transport): Promise<boolean> => {
+    // Read the outbox fresh each time, so writes made during an earlier batch are sent too
+    const batch = await storage.transaction("read", (tx) => tx.outbox.list(pushBatchSize));
+    if (batch.length === 0) {
+      return false;
+    }
+
+    // If this succeeds but the move below never happens,
+    // the batch stays in the outbox and is pushed again; the server ignores timestamps it has.
+    await transport.push({ nodeId, deltas: batch });
+
+    // Moving to history (not deleting) keeps these deltas counting for last-writer-wins
+    const timestamps = batch.map((delta) => delta.timestamp);
+    await storage.transaction("readwrite", (tx) => tx.outbox.moveToHistory(timestamps));
+
+    return true;
   };
 
   return {
@@ -259,10 +321,12 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
         throw new Error("Cannot sync without a transport");
       }
 
-      let hasMore = true;
-      while (hasMore) {
-        // oxlint-disable-next-line no-await-in-loop -- each page starts from the cursor the last one saved
-        hasMore = await pullPage(transport);
+      await pullAll(transport);
+
+      let pushed = true;
+      while (pushed) {
+        // oxlint-disable-next-line no-await-in-loop -- each batch is the oldest left after the last one moved
+        pushed = await pushBatch(transport);
       }
     },
   };

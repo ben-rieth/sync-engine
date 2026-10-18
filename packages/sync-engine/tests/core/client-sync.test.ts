@@ -5,8 +5,12 @@ import { memoryTransport } from "#adapters/transport-memory";
 import { createSyncClient, type SyncClientOptions } from "#core/client/client";
 import type { Delta } from "#core/delta";
 import { ClockDriftError } from "#core/hlc/clock";
-import { HLCTimestamp } from "#core/hlc/timestamp";
-import { ServerProtocolError, type PullResult } from "#core/server/server";
+import { compareTimestamps, HLCTimestamp } from "#core/hlc/timestamp";
+import {
+  ServerProtocolError,
+  type PullResult,
+  type ServerDatabaseAdapter,
+} from "#core/server/server";
 import type { Transport } from "#core/server/transport";
 import type { StorageAdapter, StorageTx } from "#core/storage";
 
@@ -31,12 +35,18 @@ const del = (physical: number, objectId: string, node = "node-b"): Delta => ({
   objectId,
 });
 
-// Counts pull calls and can run a hook after the server answers but before the client sees it.
+type Hook = (() => Promise<void>) | undefined;
+
+// Records calls and runs optional hooks: `beforeReturn` after the server answers a pull but before
+// the client sees it; `beforePush` before a push reaches the server, `afterPush` after it has.
 const spyTransport = (inner: Transport) => {
   const spy = {
     pulls: 0,
     cursors: [] as (string | null)[],
-    beforeReturn: undefined as (() => Promise<void>) | undefined,
+    pushes: [] as Parameters<Transport["push"]>[0][],
+    beforeReturn: undefined as Hook,
+    beforePush: undefined as Hook,
+    afterPush: undefined as Hook,
     transport: {
       pull: async (request) => {
         spy.pulls++;
@@ -45,7 +55,12 @@ const spyTransport = (inner: Transport) => {
         await spy.beforeReturn?.();
         return result;
       },
-      push: (request) => inner.push(request),
+      push: async (request) => {
+        spy.pushes.push(request);
+        await spy.beforePush?.();
+        await inner.push(request);
+        await spy.afterPush?.();
+      },
     } satisfies Transport,
   };
   return spy;
@@ -101,8 +116,18 @@ const cursor = (storage: StorageAdapter) => read(storage, (tx) => tx.meta.get("c
 
 const storedClock = (storage: StorageAdapter) => read(storage, (tx) => tx.meta.get("clock"));
 
+const timestamps = (deltas: Delta[]) => deltas.map((delta) => delta.timestamp);
+
 const inHistory = (storage: StorageAdapter, deltas: Delta[]) =>
-  read(storage, (tx) => tx.history.has(deltas.map((delta) => delta.timestamp)));
+  read(storage, (tx) => tx.history.has(timestamps(deltas)));
+
+const outbox = (storage: StorageAdapter) => read(storage, (tx) => tx.outbox.list());
+
+// Everything the server holds for USER, as another device would see it
+const serverDeltas = async (server: ServerDatabaseAdapter): Promise<Delta[]> => {
+  const page = await server.pull(USER, { cursor: null, excludeNodeId: "node-z", limit: 1000 });
+  return page.deltas;
+};
 
 describe("syncNow pulling", () => {
   it("throws without a transport", async () => {
@@ -157,6 +182,42 @@ describe("syncNow pulling", () => {
       const merged = await row(storage, "obj-1");
 
       expect(merged).toEqual({ id: "obj-1", title: "newest" });
+    });
+
+    it("looks up each cell and row once per page", async () => {
+      const inner = clientMemoryStorage();
+      const cellLookups: string[] = [];
+      const objectLookups: string[] = [];
+      const recording: StorageAdapter = {
+        transaction: (mode, fn) =>
+          inner.transaction(mode, (tx) =>
+            fn({
+              ...tx,
+              latest: (cells) => {
+                cellLookups.push(...cells.map((cell) => `${cell.objectId}.${cell.column}`));
+                return tx.latest(cells);
+              },
+              deleted: (objects) => {
+                objectLookups.push(...objects.map((object) => object.objectId));
+                return tx.deleted(objects);
+              },
+            }),
+          ),
+      };
+      const { client, remote } = await setup({ storage: recording });
+      await remote(
+        set(START - 4, "obj-1", "title", "old"),
+        set(START - 3, "obj-1", "title", "new"),
+        set(START - 2, "obj-1", "done", false),
+        del(START - 1, "obj-2"),
+      );
+
+      await client.syncNow();
+      const merged = await row(inner, "obj-1");
+
+      expect(cellLookups.toSorted()).toEqual(["obj-1.done", "obj-1.title"]);
+      expect(objectLookups.toSorted()).toEqual(["obj-1", "obj-2"]);
+      expect(merged).toEqual({ id: "obj-1", title: "new", done: false });
     });
 
     it("updates only the columns in the remote deltas", async () => {
@@ -400,9 +461,39 @@ describe("syncNow pulling", () => {
       const first = await row(storage, "obj-1");
       const second = await row(storage, "obj-2");
 
-      expect(spy.cursors).toEqual([null, "2"]);
+      // "1" is the next page fetched early, discarded once the save sees the moved cursor
+      expect(spy.cursors).toEqual([null, "1", "2"]);
       expect(savedCursor).toBe("2");
       expect(first).toEqual({ id: "obj-1", title: "hello" });
+      expect(second).toEqual({ id: "obj-2", title: "world" });
+    });
+    it("fetches the next page while saving the current one", async () => {
+      const inner = clientMemoryStorage();
+      const pullsDuringSave: number[] = [];
+      let counter: { pulls: number } | undefined;
+      const recording: StorageAdapter = {
+        transaction: (mode, fn) =>
+          inner.transaction(mode, (tx) =>
+            fn({
+              ...tx,
+              latest: (cells) => {
+                pullsDuringSave.push(counter?.pulls ?? 0);
+                return tx.latest(cells);
+              },
+            }),
+          ),
+      };
+      const { client, spy, remote } = await setup({ storage: recording, pullLimit: 1 });
+      counter = spy;
+      await remote(
+        set(START - 2, "obj-1", "title", "hello"),
+        set(START - 1, "obj-2", "title", "world"),
+      );
+
+      await client.syncNow();
+      const second = await row(inner, "obj-2");
+
+      expect(pullsDuringSave[0]).toBe(2);
       expect(second).toEqual({ id: "obj-2", title: "world" });
     });
   });
@@ -415,7 +506,7 @@ describe("syncNow pulling", () => {
 
       await client.syncNow();
       await client.update(TABLE, "obj-1", { title: "local" });
-      const [local] = await read(storage, (tx) => tx.outbox.list());
+      const [local] = await outbox(storage);
       const updated = await row(storage, "obj-1");
 
       expect(local && local.timestamp > ahead.timestamp).toBe(true);
@@ -509,6 +600,20 @@ describe("syncNow pulling", () => {
       expect(savedCursor).toBe("1");
     });
 
+    it("throws the save error when the next page's fetch fails too", async () => {
+      const drifted = set(START + 5000, "obj-1", "title", "drifted");
+      const { client, storage } = await setup({
+        maxDriftMs: 1000,
+        // the early second pull throws, as the script has run out
+        transport: scriptedTransport([{ deltas: [drifted], cursor: "1", hasMore: true }]),
+      });
+
+      await expect(client.syncNow()).rejects.toBeInstanceOf(ClockDriftError);
+      const savedCursor = await cursor(storage);
+
+      expect(savedCursor).toBeUndefined();
+    });
+
     it("rejects a page containing an invalid timestamp and changes nothing", async () => {
       const valid = set(START - 1, "obj-1", "title", "fine");
       const invalid: Delta = { ...set(START - 1, "obj-2", "title", "bad"), timestamp: "garbage" };
@@ -523,5 +628,170 @@ describe("syncNow pulling", () => {
       expect(validRow).toBeUndefined();
       expect(savedCursor).toBeUndefined();
     });
+  });
+});
+
+describe("syncNow pushing", () => {
+  it.each([0, -1, 1.5, Number.NaN])(
+    "rejects an invalid pushBatchSize of %s",
+    async (pushBatchSize) => {
+      await expect(setup({ pushBatchSize })).rejects.toThrow(RangeError);
+    },
+  );
+
+  it("sends the outbox to the server and moves it to history", async () => {
+    const { client, storage, server, spy } = await setup();
+    await client.insert(TABLE, { title: "hello", done: false }, { id: "obj-1" });
+    const pending = await outbox(storage);
+
+    await client.syncNow();
+    const remaining = await outbox(storage);
+    const recorded = await inHistory(storage, pending);
+    const onServer = await serverDeltas(server);
+
+    expect(pending).toHaveLength(2);
+    expect(remaining).toEqual([]);
+    expect(recorded.size).toBe(2);
+    expect(onServer).toEqual(pending);
+    expect(spy.pushes.map((push) => push.nodeId)).toEqual(["node-a"]);
+  });
+
+  it("pushes deletes", async () => {
+    const { client, server } = await setup();
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+    await client.syncNow();
+    await client.delete(TABLE, "obj-1");
+
+    await client.syncNow();
+    const onServer = await serverDeltas(server);
+    const deletes = onServer.filter((delta) => delta.kind === "delete");
+
+    expect(deletes).toMatchObject([{ kind: "delete", table: TABLE, objectId: "obj-1" }]);
+  });
+
+  it("does not push when the outbox is empty", async () => {
+    const { client, spy } = await setup();
+
+    await client.syncNow();
+
+    expect(spy.pushes).toEqual([]);
+  });
+
+  it("delivers a row to another device", async () => {
+    const { client, server, options } = await setup();
+    const otherStorage = clientMemoryStorage();
+    const other = await createSyncClient({
+      ...options,
+      storage: otherStorage,
+      generateNodeId: () => "node-b",
+      transport: memoryTransport(server, USER),
+    });
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+
+    await client.syncNow();
+    await other.syncNow();
+    const delivered = await row(otherStorage, "obj-1");
+
+    expect(delivered).toEqual({ id: "obj-1", title: "hello" });
+  });
+
+  it("pushes in batches, oldest first", async () => {
+    const { client, storage, spy } = await setup({ pushBatchSize: 2 });
+    await client.insert(TABLE, { a: 1, b: 2, c: 3, d: 4, e: 5 }, { id: "obj-1" });
+    const pending = await outbox(storage);
+
+    await client.syncNow();
+    const sizes = spy.pushes.map((push) => push.deltas.length);
+    const sent = spy.pushes.flatMap((push) => timestamps(push.deltas));
+
+    expect(sizes).toEqual([2, 2, 1]);
+    expect(sent).toEqual(timestamps(pending).toSorted(compareTimestamps));
+  });
+
+  it("keeps pushed deltas counting for last-writer-wins", async () => {
+    const { client, storage, remote } = await setup();
+    await client.insert(TABLE, { title: "local" }, { id: "obj-1" });
+    await client.syncNow();
+    await remote(set(START - 1, "obj-1", "title", "older remote"));
+
+    await client.syncNow();
+    const kept = await row(storage, "obj-1");
+
+    expect(kept).toEqual({ id: "obj-1", title: "local" });
+  });
+
+  it("leaves the outbox unchanged when the push fails, and sends it on the next sync", async () => {
+    const { client, storage, server, spy } = await setup();
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+    const pending = await outbox(storage);
+    spy.beforePush = async () => {
+      throw new Error("offline");
+    };
+
+    await expect(client.syncNow()).rejects.toThrow("offline");
+    const afterFailure = await outbox(storage);
+    const serverAfterFailure = await serverDeltas(server);
+
+    spy.beforePush = undefined;
+    await client.syncNow();
+    const afterRetry = await outbox(storage);
+    const serverAfterRetry = await serverDeltas(server);
+
+    expect(afterFailure).toEqual(pending);
+    expect(serverAfterFailure).toEqual([]);
+    expect(afterRetry).toEqual([]);
+    expect(serverAfterRetry).toEqual(pending);
+  });
+
+  it("pushes again after a lost reply without duplicating on the server", async () => {
+    const { client, storage, server, spy } = await setup();
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+    const pending = await outbox(storage);
+    spy.afterPush = async () => {
+      spy.afterPush = undefined;
+      throw new Error("connection lost");
+    };
+
+    await expect(client.syncNow()).rejects.toThrow("connection lost");
+    const afterLostReply = await outbox(storage);
+
+    await client.syncNow();
+    const afterRetry = await outbox(storage);
+    const onServer = await serverDeltas(server);
+
+    expect(afterLostReply).toEqual(pending);
+    expect(afterRetry).toEqual([]);
+    expect(spy.pushes).toHaveLength(2);
+    expect(onServer).toEqual(pending);
+  });
+
+  it("sends writes made during a push in the same sync", async () => {
+    const { client, storage, server, spy } = await setup();
+    await client.insert(TABLE, { title: "before" }, { id: "obj-1" });
+    spy.beforePush = async () => {
+      spy.beforePush = undefined;
+      await client.insert(TABLE, { title: "during" }, { id: "obj-2" });
+    };
+
+    await client.syncNow();
+    const remaining = await outbox(storage);
+    const onServer = await serverDeltas(server);
+    const objects = onServer.map((delta) => delta.objectId);
+
+    expect(remaining).toEqual([]);
+    expect(spy.pushes).toHaveLength(2);
+    expect(objects).toEqual(["obj-1", "obj-2"]);
+  });
+
+  it("does not push if the pull fails", async () => {
+    const { client, storage, spy, remote } = await setup({ maxDriftMs: 1000 });
+    await client.insert(TABLE, { title: "local" }, { id: "obj-1" });
+    await remote(set(START + 5000, "obj-2", "title", "drifted"));
+
+    await expect(client.syncNow()).rejects.toBeInstanceOf(ClockDriftError);
+    const pending = await outbox(storage);
+
+    expect(spy.pushes).toEqual([]);
+    expect(pending).toHaveLength(1);
   });
 });
