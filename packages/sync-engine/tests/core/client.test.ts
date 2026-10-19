@@ -4,8 +4,8 @@ import { createSyncClient, type SyncClientOptions } from "#core/client/client";
 import type { Delta } from "#core/delta";
 import { ConfigError, UnexpectedError } from "#core/errors";
 import { HLCTimestamp } from "#core/hlc/timestamp";
-import type { StorageAdapter, StorageTx } from "#core/storage";
-import { failed, failedBecause, ok, openClient, timestamps } from "../helpers";
+import type { StorageAdapter } from "#core/storage";
+import { failed, failedBecause, ok, openClient, read, timestamps } from "../helpers";
 
 const TABLE = "items";
 const START = 1_700_000_000_000;
@@ -39,9 +39,6 @@ const setup = (overrides: Partial<SyncClientOptions> = {}) => {
     },
   };
 };
-
-const read = <T>(storage: StorageAdapter, fn: (tx: StorageTx) => Promise<T>): Promise<T> =>
-  storage.transaction("read", fn);
 
 const outbox = (storage: StorageAdapter): Promise<Delta[]> =>
   read(storage, (tx) => tx.outbox.list());

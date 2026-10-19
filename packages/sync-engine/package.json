@@ -16,5 +16,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "build": "tsdown"
+  },
+  "devDependencies": {
+    "fast-check": "^4.10.2"
   }
 }

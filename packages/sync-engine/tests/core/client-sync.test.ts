@@ -7,10 +7,10 @@ import type { Delta } from "#core/delta";
 import { ConfigError, TransportError } from "#core/errors";
 import { ClockDriftError, LocalClockAheadError } from "#core/hlc/clock";
 import { compareTimestamps, HLCTimestamp } from "#core/hlc/timestamp";
-import type { PullResult, ServerDatabaseAdapter } from "#core/server/server";
+import type { PullResult } from "#core/server/server";
 import type { Transport } from "#core/server/transport";
-import type { StorageAdapter, StorageTx } from "#core/storage";
-import { failed, failedBecause, openClient, timestamps } from "../helpers";
+import type { StorageAdapter } from "#core/storage";
+import { failed, failedBecause, openClient, read, serverDeltas, timestamps } from "../helpers";
 
 const TABLE = "items";
 const START = 1_700_000_000_000;
@@ -107,9 +107,6 @@ const setup = async (
   };
 };
 
-const read = <T>(storage: StorageAdapter, fn: (tx: StorageTx) => Promise<T>): Promise<T> =>
-  storage.transaction("read", fn);
-
 const row = (storage: StorageAdapter, objectId: string) =>
   read(storage, (tx) => tx.rows.get(TABLE, objectId));
 
@@ -121,12 +118,6 @@ const inHistory = (storage: StorageAdapter, deltas: Delta[]) =>
   read(storage, (tx) => tx.history.has(timestamps(deltas)));
 
 const outbox = (storage: StorageAdapter) => read(storage, (tx) => tx.outbox.list());
-
-// Everything the server holds for USER, as another device would see it
-const serverDeltas = async (server: ServerDatabaseAdapter): Promise<Delta[]> => {
-  const page = await server.pull(USER, { cursor: null, excludeNodeId: "node-z", limit: 1000 });
-  return page.deltas;
-};
 
 // Tests run on Node, but the ES-only lib has no timer types
 declare const setTimeout: (callback: () => void, ms: number) => unknown;
@@ -361,11 +352,9 @@ describe("syncNow pulling", () => {
 
       expect(spy.pulls).toBe(3);
       expect(savedCursor).toBe("5");
-      for (let i = 1; i <= 5; i++) {
-        // oxlint-disable-next-line no-await-in-loop -- checking each row
-        const pulled = await row(storage, `obj-${i}`);
-        expect(pulled).toEqual({ id: `obj-${i}`, title: `row ${i}` });
-      }
+      const ids = [1, 2, 3, 4, 5];
+      const pulled = await Promise.all(ids.map((i) => row(storage, `obj-${i}`)));
+      expect(pulled).toEqual(ids.map((i) => ({ id: `obj-${i}`, title: `row ${i}` })));
     });
 
     it("sends the saved cursor and its own node id", async () => {

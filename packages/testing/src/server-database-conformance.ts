@@ -356,17 +356,19 @@ export const runServerDatabaseConformance = (
       it("rejects an invalid cursor", async () => {
         await push([delta(1)]);
 
-        for (const cursor of invalidCursors) {
-          // oxlint-disable-next-line no-await-in-loop -- one rejection per cursor
-          await expect(pull(cursor), cursor).rejects.toBeInstanceOf(RangeError);
-        }
+        await Promise.all(
+          invalidCursors.map((cursor) =>
+            expect(pull(cursor), cursor).rejects.toBeInstanceOf(RangeError),
+          ),
+        );
       });
 
       it("rejects an invalid limit", async () => {
-        for (const limit of [0, -1, 1.5, Number.NaN]) {
-          // oxlint-disable-next-line no-await-in-loop -- one rejection per limit
-          await expect(pull(null, { limit }), String(limit)).rejects.toBeInstanceOf(RangeError);
-        }
+        await Promise.all(
+          [0, -1, 1.5, Number.NaN].map((limit) =>
+            expect(pull(null, { limit }), String(limit)).rejects.toBeInstanceOf(RangeError),
+          ),
+        );
       });
     });
 

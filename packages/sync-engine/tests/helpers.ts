@@ -4,6 +4,8 @@ import type { Delta } from "#core/delta";
 import type { SyncError } from "#core/errors";
 import { HLCTimestamp } from "#core/hlc/timestamp";
 import type { Result } from "#core/result";
+import type { ServerDatabaseAdapter } from "#core/server/server";
+import type { StorageAdapter, StorageTx } from "#core/storage";
 
 /** A `set` delta on items/obj-1/title whose timestamp is `physical` on `node`. */
 export const delta = (physical: number, node = "node-a", value: unknown = physical): Delta => ({
@@ -16,6 +18,18 @@ export const delta = (physical: number, node = "node-a", value: unknown = physic
 });
 
 export const timestamps = (deltas: Delta[]): string[] => deltas.map((d) => d.timestamp);
+
+export const read = <T>(storage: StorageAdapter, fn: (tx: StorageTx) => Promise<T>): Promise<T> =>
+  storage.transaction("read", fn);
+
+// Everything the server holds for `user`, as another device would see it
+export const serverDeltas = async (
+  server: ServerDatabaseAdapter,
+  user = "user-1",
+): Promise<Delta[]> => {
+  const page = await server.pull(user, { cursor: null, excludeNodeId: "node-z", limit: 100_000 });
+  return page.deltas;
+};
 
 /** Returns `list[index]`, throwing instead of returning undefined when it is out of range. */
 export const elementAt = <T>(list: readonly T[], index: number): T => {
