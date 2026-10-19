@@ -1,18 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { clientMemoryStorage } from "#adapters/client-memory";
-import { serverMemoryDatabase } from "#adapters/server-memory";
+import { serverMemoryDatabase, type ServerMemoryDatabaseOptions } from "#adapters/server-memory";
 import { memoryTransport } from "#adapters/transport-memory";
-import { createSyncClient, type SyncClientOptions } from "#core/client/client";
+import { type SyncClientOptions, type SyncNowError } from "#core/client/client";
 import type { Delta } from "#core/delta";
-import { ClockDriftError } from "#core/hlc/clock";
+import { ConfigError, TransportError } from "#core/errors";
+import { ClockDriftError, LocalClockAheadError } from "#core/hlc/clock";
 import { compareTimestamps, HLCTimestamp } from "#core/hlc/timestamp";
-import {
-  ServerProtocolError,
-  type PullResult,
-  type ServerDatabaseAdapter,
-} from "#core/server/server";
+import type { PullResult, ServerDatabaseAdapter } from "#core/server/server";
 import type { Transport } from "#core/server/transport";
 import type { StorageAdapter, StorageTx } from "#core/storage";
+import { failed, failedBecause, openClient, timestamps } from "../helpers";
 
 const TABLE = "items";
 const START = 1_700_000_000_000;
@@ -79,9 +77,12 @@ const scriptedTransport = (pages: PullResult[]): Transport => ({
 });
 
 // One local client ("node-a") on a memory server; `remote` pushes deltas as another device would.
-const setup = async (overrides: Partial<SyncClientOptions> = {}) => {
+const setup = async (
+  overrides: Partial<SyncClientOptions> = {},
+  serverOptions: ServerMemoryDatabaseOptions = {},
+) => {
   const storage = clientMemoryStorage();
-  const server = serverMemoryDatabase();
+  const server = serverMemoryDatabase(serverOptions);
   const spy = spyTransport(memoryTransport(server, USER));
   let time = START;
   const options: SyncClientOptions = {
@@ -91,7 +92,7 @@ const setup = async (overrides: Partial<SyncClientOptions> = {}) => {
     transport: spy.transport,
     ...overrides,
   };
-  const client = await createSyncClient(options);
+  const client = await openClient(options);
 
   return {
     client,
@@ -116,8 +117,6 @@ const cursor = (storage: StorageAdapter) => read(storage, (tx) => tx.meta.get("c
 
 const storedClock = (storage: StorageAdapter) => read(storage, (tx) => tx.meta.get("clock"));
 
-const timestamps = (deltas: Delta[]) => deltas.map((delta) => delta.timestamp);
-
 const inHistory = (storage: StorageAdapter, deltas: Delta[]) =>
   read(storage, (tx) => tx.history.has(timestamps(deltas)));
 
@@ -133,7 +132,7 @@ describe("syncNow pulling", () => {
   it("throws without a transport", async () => {
     const { client } = await setup({ transport: undefined });
 
-    await expect(client.syncNow()).rejects.toThrow("Cannot sync without a transport");
+    await expect(client.raw.syncNow()).rejects.toThrow(ConfigError);
   });
 
   it("does nothing when the server is empty", async () => {
@@ -148,7 +147,7 @@ describe("syncNow pulling", () => {
   });
 
   it.each([0, -1, 1.5, Number.NaN])("rejects an invalid pullLimit of %s", async (pullLimit) => {
-    await expect(setup({ pullLimit })).rejects.toThrow(RangeError);
+    await expect(setup({ pullLimit })).rejects.toThrow(ConfigError);
   });
 
   describe("applying", () => {
@@ -405,7 +404,7 @@ describe("syncNow pulling", () => {
       });
       await client.syncNow();
 
-      await expect(client.syncNow()).rejects.toBeInstanceOf(ServerProtocolError);
+      await failed(client.raw.syncNow(), "server-protocol");
       const rejected = await row(storage, "obj-2");
       const recorded = await inHistory(storage, [stuck]);
       const savedCursor = await cursor(storage);
@@ -421,7 +420,7 @@ describe("syncNow pulling", () => {
         set(START - 2, "obj-1", "title", "hello"),
         set(START - 1, "obj-2", "title", "world"),
       );
-      const other = await createSyncClient({
+      const other = await openClient({
         ...options,
         transport: memoryTransport(server, USER),
       });
@@ -447,7 +446,7 @@ describe("syncNow pulling", () => {
         set(START - 2, "obj-1", "title", "hello"),
         set(START - 1, "obj-2", "title", "world"),
       );
-      const other = await createSyncClient({
+      const other = await openClient({
         ...options,
         transport: memoryTransport(server, USER),
       });
@@ -530,7 +529,7 @@ describe("syncNow pulling", () => {
       const drifted = set(START + 5000, "obj-1", "title", "too far ahead");
       await remote(drifted);
 
-      await expect(client.syncNow()).rejects.toBeInstanceOf(ClockDriftError);
+      await failed(client.raw.syncNow(), "remote-ahead");
       const rejected = await row(storage, "obj-1");
       const recorded = await inHistory(storage, [drifted]);
       const savedCursor = await cursor(storage);
@@ -545,7 +544,7 @@ describe("syncNow pulling", () => {
     it("applies the drifted page once local time catches up", async () => {
       const { client, storage, remote, setTime } = await setup({ maxDriftMs: 1000 });
       await remote(set(START + 5000, "obj-1", "title", "too far ahead"));
-      await expect(client.syncNow()).rejects.toBeInstanceOf(ClockDriftError);
+      await failed(client.raw.syncNow(), "remote-ahead");
 
       setTime(START + 4500);
       await client.syncNow();
@@ -561,7 +560,7 @@ describe("syncNow pulling", () => {
         set(START + 5000, "obj-2", "title", "drifted"),
       );
 
-      await expect(client.syncNow()).rejects.toBeInstanceOf(ClockDriftError);
+      await failed(client.raw.syncNow(), "remote-ahead");
       const fine = await row(storage, "obj-1");
       const drifted = await row(storage, "obj-2");
       const savedCursor = await cursor(storage);
@@ -573,13 +572,13 @@ describe("syncNow pulling", () => {
   });
 
   describe("failures", () => {
-    it("passes transport errors through and changes nothing", async () => {
+    it("reports transport errors and changes nothing", async () => {
       const storage = clientMemoryStorage();
       const transport = memoryTransport(serverMemoryDatabase(), USER);
       transport.online = false;
-      const client = await createSyncClient({ storage, transport, generateNodeId: () => "node-a" });
+      const client = await openClient({ storage, transport, generateNodeId: () => "node-a" });
 
-      await expect(client.syncNow()).rejects.toThrow("memoryTransport is offline");
+      await failedBecause(client.raw.syncNow(), "transport", "memoryTransport is offline");
       const savedCursor = await cursor(storage);
 
       expect(savedCursor).toBeUndefined();
@@ -592,7 +591,7 @@ describe("syncNow pulling", () => {
         transport: scriptedTransport([{ deltas: [fine], cursor: "1", hasMore: true }]),
       });
 
-      await expect(client.syncNow()).rejects.toThrow("No more scripted pages");
+      await failedBecause(client.raw.syncNow(), "transport", "No more scripted pages");
       const kept = await row(storage, "obj-1");
       const savedCursor = await cursor(storage);
 
@@ -608,7 +607,7 @@ describe("syncNow pulling", () => {
         transport: scriptedTransport([{ deltas: [drifted], cursor: "1", hasMore: true }]),
       });
 
-      await expect(client.syncNow()).rejects.toBeInstanceOf(ClockDriftError);
+      await failed(client.raw.syncNow(), "remote-ahead");
       const savedCursor = await cursor(storage);
 
       expect(savedCursor).toBeUndefined();
@@ -621,7 +620,7 @@ describe("syncNow pulling", () => {
         transport: scriptedTransport([{ deltas: [valid, invalid], cursor: "2", hasMore: false }]),
       });
 
-      await expect(client.syncNow()).rejects.toThrow("Invalid HLC timestamp");
+      await failed(client.raw.syncNow(), "server-protocol");
       const validRow = await row(storage, "obj-1");
       const savedCursor = await cursor(storage);
 
@@ -635,7 +634,7 @@ describe("syncNow pushing", () => {
   it.each([0, -1, 1.5, Number.NaN])(
     "rejects an invalid pushBatchSize of %s",
     async (pushBatchSize) => {
-      await expect(setup({ pushBatchSize })).rejects.toThrow(RangeError);
+      await expect(setup({ pushBatchSize })).rejects.toThrow(ConfigError);
     },
   );
 
@@ -680,7 +679,7 @@ describe("syncNow pushing", () => {
   it("delivers a row to another device", async () => {
     const { client, server, options } = await setup();
     const otherStorage = clientMemoryStorage();
-    const other = await createSyncClient({
+    const other = await openClient({
       ...options,
       storage: otherStorage,
       generateNodeId: () => "node-b",
@@ -728,7 +727,7 @@ describe("syncNow pushing", () => {
       throw new Error("offline");
     };
 
-    await expect(client.syncNow()).rejects.toThrow("offline");
+    await failedBecause(client.raw.syncNow(), "transport", "offline");
     const afterFailure = await outbox(storage);
     const serverAfterFailure = await serverDeltas(server);
 
@@ -752,7 +751,7 @@ describe("syncNow pushing", () => {
       throw new Error("connection lost");
     };
 
-    await expect(client.syncNow()).rejects.toThrow("connection lost");
+    await failedBecause(client.raw.syncNow(), "transport", "connection lost");
     const afterLostReply = await outbox(storage);
 
     await client.syncNow();
@@ -788,10 +787,87 @@ describe("syncNow pushing", () => {
     await client.insert(TABLE, { title: "local" }, { id: "obj-1" });
     await remote(set(START + 5000, "obj-2", "title", "drifted"));
 
-    await expect(client.syncNow()).rejects.toBeInstanceOf(ClockDriftError);
+    await failed(client.raw.syncNow(), "remote-ahead");
     const pending = await outbox(storage);
 
     expect(spy.pushes).toEqual([]);
     expect(pending).toHaveLength(1);
+  });
+
+  it("reports a device clock ahead of the server", async () => {
+    const { client, storage, setTime } = await setup({}, { now: () => START, maxDriftMs: 1000 });
+    setTime(START + 3000);
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+    const pending = await outbox(storage);
+
+    const error = await failed(client.raw.syncNow(), "clock-ahead");
+    const remaining = await outbox(storage);
+
+    expect(error).toBeInstanceOf(LocalClockAheadError);
+    expect(error).toMatchObject({ skewMs: 3000, cause: expect.any(ClockDriftError) });
+    expect(remaining).toEqual(pending);
+  });
+
+  it("reports a transport whose pull throws synchronously", async () => {
+    const transport: Transport = {
+      pull: () => {
+        throw new Error("sync pull failure");
+      },
+      push: async () => {},
+    };
+    const client = await openClient({
+      storage: clientMemoryStorage(),
+      transport,
+      generateNodeId: () => "node-a",
+    });
+
+    const error = await failedBecause(client.raw.syncNow(), "transport", "sync pull failure");
+
+    expect(error).toBeInstanceOf(TransportError);
+  });
+
+  it("reports a transport whose push throws synchronously", async () => {
+    const transport: Transport = {
+      pull: async () => ({ deltas: [], cursor: null, hasMore: false }),
+      push: () => {
+        throw new Error("sync push failure");
+      },
+    };
+    const client = await openClient({
+      storage: clientMemoryStorage(),
+      transport,
+      generateNodeId: () => "node-a",
+    });
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+
+    const error = await failedBecause(client.raw.syncNow(), "transport", "sync push failure");
+
+    expect(error).toBeInstanceOf(TransportError);
+  });
+
+  it("reports a clock drift thrown synchronously by push as a local clock ahead", async () => {
+    const drift = new ClockDriftError(new HLCTimestamp(START + 3000, 0, "node-a"), START);
+    const transport: Transport = {
+      pull: async () => ({ deltas: [], cursor: null, hasMore: false }),
+      push: () => {
+        throw drift;
+      },
+    };
+    const client = await openClient({
+      storage: clientMemoryStorage(),
+      transport,
+      generateNodeId: () => "node-a",
+    });
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+
+    const error = await failed(client.raw.syncNow(), "clock-ahead");
+
+    expect(error).toMatchObject({ skewMs: 3000, cause: drift });
+  });
+
+  it("narrows sync errors by code", () => {
+    expectTypeOf((error: SyncNowError) =>
+      error.code === "clock-ahead" ? error.skewMs : null,
+    ).returns.toEqualTypeOf<number | null>();
   });
 });

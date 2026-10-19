@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ConfigError } from "#core/errors";
 import { ClockDriftError, HybridLogicalClock } from "#core/hlc/clock";
 import { HLCTimestamp, MAX_LOGICAL } from "#core/hlc/timestamp";
 import { elementAt } from "../../helpers";
@@ -120,18 +121,19 @@ describe("HybridLogicalClock", () => {
     });
 
     const invalidCases = [
-      { name: "empty nodeId", nodeId: "", maxDriftMs: undefined },
+      { name: "empty nodeId", nodeId: "", maxDriftMs: undefined, error: RangeError },
       {
         name: "invalid nodeId characters",
         nodeId: "a.b",
         maxDriftMs: undefined,
+        error: RangeError,
       },
-      { name: "negative maxDriftMs", nodeId: NODE, maxDriftMs: -1 },
-      { name: "NaN maxDriftMs", nodeId: NODE, maxDriftMs: Number.NaN },
+      { name: "negative maxDriftMs", nodeId: NODE, maxDriftMs: -1, error: ConfigError },
+      { name: "NaN maxDriftMs", nodeId: NODE, maxDriftMs: Number.NaN, error: ConfigError },
     ];
 
-    it.each(invalidCases)("rejects $name", ({ nodeId, maxDriftMs }) => {
-      expect(() => createClock({ nodeId, maxDriftMs })).toThrow(RangeError);
+    it.each(invalidCases)("rejects $name", ({ nodeId, maxDriftMs, error }) => {
+      expect(() => createClock({ nodeId, maxDriftMs })).toThrow(error);
     });
 
     it("accepts Infinity maxDriftMs", () => {

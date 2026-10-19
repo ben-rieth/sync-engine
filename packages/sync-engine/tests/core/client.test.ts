@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { clientMemoryStorage } from "#adapters/client-memory";
 import { createSyncClient, type SyncClientOptions } from "#core/client/client";
 import type { Delta } from "#core/delta";
+import { ConfigError, UnexpectedError } from "#core/errors";
 import { HLCTimestamp } from "#core/hlc/timestamp";
 import type { StorageAdapter, StorageTx } from "#core/storage";
-import { timestamps } from "../helpers";
+import { failed, failedBecause, ok, openClient, timestamps } from "../helpers";
 
 const TABLE = "items";
 const START = 1_700_000_000_000;
@@ -30,7 +31,9 @@ const setup = (overrides: Partial<SyncClientOptions> = {}) => {
   return {
     storage,
     options,
-    create: (extra: Partial<SyncClientOptions> = {}) => createSyncClient({ ...options, ...extra }),
+    create: async (extra: Partial<SyncClientOptions> = {}) => {
+      return openClient({ ...options, ...extra });
+    },
     setTime: (value: number) => {
       time = value;
     },
@@ -122,19 +125,68 @@ describe("createSyncClient", () => {
     it("rejects an invalid generated node id and saves nothing", async () => {
       const { storage, create } = setup({ generateNodeId: () => "not valid!" });
 
-      await expect(create()).rejects.toThrow("Invalid HLC nodeId");
+      await expect(create()).rejects.toThrow(ConfigError);
       const savedNodeId = await read(storage, (tx) => tx.meta.get("nodeId"));
       expect(savedNodeId).toBeUndefined();
     });
 
     it("uses crypto.randomUUID by default", async () => {
-      const client = await createSyncClient({ storage: clientMemoryStorage() });
+      const client = await ok(createSyncClient({ storage: clientMemoryStorage() }));
 
       expect(client.nodeId).toMatch(/^[0-9a-f-]{36}$/);
     });
   });
 
+  describe("failures", () => {
+    it.each([-1, Number.NaN])("throws for an invalid maxDriftMs of %s", async (maxDriftMs) => {
+      const { create } = setup({ maxDriftMs });
+
+      await expect(create()).rejects.toThrow(ConfigError);
+    });
+
+    it("throws at start when the default id generator cannot run", async () => {
+      vi.stubGlobal("crypto", undefined);
+      try {
+        const created = createSyncClient({
+          storage: clientMemoryStorage(),
+          generateNodeId: () => "node-a",
+        });
+
+        await expect(created).rejects.toThrow(ConfigError);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("returns a storage failure instead of throwing", async () => {
+      const broken: StorageAdapter = {
+        transaction: async () => {
+          throw new Error("storage unavailable");
+        },
+      };
+
+      const created = createSyncClient({ storage: broken, generateNodeId: () => "node-a" });
+
+      const error = await failedBecause(created, "unexpected", "storage unavailable");
+
+      expect(error).toBeInstanceOf(UnexpectedError);
+    });
+  });
+
   describe("insert", () => {
+    it("returns the id as a result", async () => {
+      const { create } = setup();
+      const client = await create();
+
+      const inserted = await client.raw.insert(TABLE, { name: "milk" });
+      const { result, error } = inserted;
+
+      expect(inserted).toEqual({ result: "id-1", error: null });
+      if (!error) {
+        expectTypeOf(result).toEqualTypeOf<string>();
+      }
+    });
+
     it("creates the row and returns its generated id", async () => {
       const { storage, create } = setup();
       const client = await create();
@@ -224,27 +276,29 @@ describe("createSyncClient", () => {
       expect(second).toEqual({ id: "shared", name: "second" });
     });
 
-    it("throws when the id belongs to an existing row", async () => {
+    it("fails when the id belongs to an existing row", async () => {
       const { storage, create } = setup();
       const client = await create();
       await client.insert(TABLE, { name: "milk" }, { id: "x" });
 
-      await expect(client.insert(TABLE, { name: "bread" }, { id: "x" })).rejects.toThrow(
-        /already exists/,
+      const error = await failed(
+        client.raw.insert(TABLE, { name: "bread" }, { id: "x" }),
+        "row-exists",
       );
       const stored = await row(storage, "x");
       const deltas = await outbox(storage);
+      expect(error).toMatchObject({ table: TABLE, objectId: "x" });
       expect(stored).toEqual({ id: "x", name: "milk" });
       expect(deltas).toHaveLength(1);
     });
 
-    it("throws when the id belongs to a deleted row", async () => {
+    it("fails when the id belongs to a deleted row", async () => {
       const { storage, create } = setup();
       const client = await create();
       await client.insert(TABLE, { name: "milk" }, { id: "x" });
       await client.delete(TABLE, "x");
 
-      await expect(client.insert(TABLE, { name: "bread" }, { id: "x" })).rejects.toThrow(/deleted/);
+      await failed(client.raw.insert(TABLE, { name: "bread" }, { id: "x" }), "row-deleted");
       const stored = await row(storage, "x");
       expect(stored).toBeUndefined();
     });
@@ -273,14 +327,12 @@ describe("createSyncClient", () => {
       expect(deletedCalls).toBe(1);
     });
 
-    it("throws for a row with no columns", async () => {
+    it("fails for a row with no columns", async () => {
       const { storage, create } = setup();
       const client = await create();
 
-      await expect(client.insert(TABLE, {})).rejects.toThrow(/no columns/);
-      await expect(client.insert(TABLE, { id: "x", note: undefined })).rejects.toThrow(
-        /no columns/,
-      );
+      await failed(client.raw.insert(TABLE, {}), "no-columns");
+      await failed(client.raw.insert(TABLE, { id: "x", note: undefined }), "no-columns");
       const deltas = await outbox(storage);
       const clock = await storedClock(storage);
       expect(deltas).toEqual([]);
@@ -394,29 +446,29 @@ describe("createSyncClient", () => {
       expect(clock).toBe(clockBefore);
     });
 
-    it("throws when the row does not exist", async () => {
+    it("fails when the row does not exist", async () => {
       const { storage, create } = setup();
       const client = await create();
 
-      await expect(client.update(TABLE, "missing", { name: "milk" })).rejects.toThrow(/not found/);
+      await failed(client.raw.update(TABLE, "missing", { name: "milk" }), "row-not-found");
       const stored = await row(storage, "missing");
       const deltas = await outbox(storage);
       expect(stored).toBeUndefined();
       expect(deltas).toEqual([]);
     });
 
-    it("throws for a deleted row and does not recreate it", async () => {
+    it("fails for a deleted row and does not recreate it", async () => {
       const { storage, create } = setup();
       const client = await create();
       const id = await client.insert(TABLE, { name: "milk" });
       await client.delete(TABLE, id);
 
-      await expect(client.update(TABLE, id, { name: "bread" })).rejects.toThrow(/not found/);
+      await failed(client.raw.update(TABLE, id, { name: "bread" }), "row-not-found");
       const stored = await row(storage, id);
       expect(stored).toBeUndefined();
     });
 
-    it("throws when another client deleted the row first", async () => {
+    it("fails when another client deleted the row first", async () => {
       const { storage, create } = setup();
       const first = await create();
       const second = await create();
@@ -424,7 +476,7 @@ describe("createSyncClient", () => {
 
       await second.delete(TABLE, id);
 
-      await expect(first.update(TABLE, id, { name: "bread" })).rejects.toThrow(/not found/);
+      await failed(first.raw.update(TABLE, id, { name: "bread" }), "row-not-found");
       const stored = await row(storage, id);
       expect(stored).toBeUndefined();
     });
@@ -534,12 +586,21 @@ describe("createSyncClient", () => {
       expectUniqueAndIncreasing(timestamps(deltas));
     });
 
+    it("reports a corrupt stored nodeId when opening", async () => {
+      const { storage, options } = setup();
+      await storage.transaction("readwrite", (tx) => tx.meta.set("nodeId", "not a valid id!"));
+
+      const error = await failed(createSyncClient(options), "corrupt-storage");
+
+      expect(error.message).toContain("not a valid id!");
+    });
+
     it("rejects writes when the stored clock is corrupt", async () => {
       const { storage, create } = setup();
       const client = await create();
       await storage.transaction("readwrite", (tx) => tx.meta.set("clock", "garbage"));
 
-      await expect(client.insert(TABLE, { name: "milk" })).rejects.toThrow(/corrupt/);
+      await failed(client.raw.insert(TABLE, { name: "milk" }), "corrupt-storage");
 
       const deltas = await outbox(storage);
       const stored = await row(storage, "id-1");
@@ -595,13 +656,17 @@ describe("createSyncClient", () => {
 
         const broken = await create({ storage: failing(storage, method) });
 
-        await expect(broken.insert(TABLE, { name: "bread" }, { id: "y" })).rejects.toThrow(
+        await failedBecause(
+          broken.raw.insert(TABLE, { name: "bread" }, { id: "y" }),
+          "unexpected",
           `${method} failed`,
         );
-        await expect(broken.update(TABLE, id, { name: "bread" })).rejects.toThrow(
+        await failedBecause(
+          broken.raw.update(TABLE, id, { name: "bread" }),
+          "unexpected",
           `${method} failed`,
         );
-        await expect(broken.delete(TABLE, id)).rejects.toThrow(`${method} failed`);
+        await failedBecause(broken.raw.delete(TABLE, id), "unexpected", `${method} failed`);
 
         const rejected = await row(storage, "y");
         const stored = await row(storage, id);
@@ -622,10 +687,14 @@ describe("createSyncClient", () => {
 
       const broken = await create({ storage: failing(storage, "rows.upsert") });
 
-      await expect(broken.insert(TABLE, { name: "bread" }, { id: "y" })).rejects.toThrow(
+      await failedBecause(
+        broken.raw.insert(TABLE, { name: "bread" }, { id: "y" }),
+        "unexpected",
         "rows.upsert failed",
       );
-      await expect(broken.update(TABLE, id, { name: "bread" })).rejects.toThrow(
+      await failedBecause(
+        broken.raw.update(TABLE, id, { name: "bread" }),
+        "unexpected",
         "rows.upsert failed",
       );
 
@@ -642,7 +711,11 @@ describe("createSyncClient", () => {
     it("keeps working after a failed write", async () => {
       const { storage, create } = setup();
       const broken = await create({ storage: failing(storage, "outbox.add") });
-      await expect(broken.insert(TABLE, { name: "bread" })).rejects.toThrow("outbox.add failed");
+      await failedBecause(
+        broken.raw.insert(TABLE, { name: "bread" }),
+        "unexpected",
+        "outbox.add failed",
+      );
 
       const client = await create();
       const id = await client.insert(TABLE, { name: "milk" });
@@ -658,7 +731,11 @@ describe("createSyncClient", () => {
 
       await client.insert(TABLE, { name: "milk" });
       fail = true;
-      await expect(client.insert(TABLE, { name: "bread" })).rejects.toThrow("meta.set failed");
+      await failedBecause(
+        client.raw.insert(TABLE, { name: "bread" }),
+        "unexpected",
+        "meta.set failed",
+      );
       fail = false;
       await client.insert(TABLE, { name: "eggs" });
 

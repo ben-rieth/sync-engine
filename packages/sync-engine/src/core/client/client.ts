@@ -1,11 +1,24 @@
 import type { Delta } from "../delta";
-import { HybridLogicalClock } from "../hlc/clock";
-import { assertNodeId } from "../hlc/node-id";
+import {
+  ConfigError,
+  CorruptStorageError,
+  RowError,
+  TransportError,
+  type UnexpectedError,
+} from "../errors";
+import {
+  assertMaxDriftMs,
+  ClockDriftError,
+  HybridLogicalClock,
+  LocalClockAheadError,
+} from "../hlc/clock";
+import { isValidNodeId } from "../hlc/node-id";
 import { HLCTimestamp } from "../hlc/timestamp";
+import { toResult, type Result } from "../result";
 import { ServerProtocolError, type PullResult } from "../server/server";
 import type { Transport } from "../server/transport";
 import { applyRemoteDeltas } from "./apply";
-import { defaultGenerateId } from "./id";
+import { requireRandomUUID } from "./id";
 import type { StorageAdapter, StorageTx } from "../storage";
 import { jsonEqual } from "#utils/json";
 
@@ -34,32 +47,52 @@ export type InsertOptions = {
   id?: string;
 };
 
+type WriteError = CorruptStorageError | UnexpectedError;
+
+export type CreateError = CorruptStorageError | UnexpectedError;
+export type InsertError = RowError<"row-exists" | "row-deleted" | "no-columns"> | WriteError;
+export type UpdateError = RowError<"row-not-found"> | WriteError;
+export type DeleteError = WriteError;
+export type SyncNowError =
+  | TransportError
+  | LocalClockAheadError
+  | ClockDriftError
+  | ServerProtocolError
+  | WriteError;
+
+/** Methods return failures as `{ error }` and reject only with `ConfigError`. */
 export type SyncClient = {
   nodeId: string;
   /**
    * Creates a row and records one delta per column. `id` and `undefined` values are ignored;
-   * use `null` to store an empty value. Throws if no columns remain, if the id belongs to
-   * an existing row, or if `options.id` belongs to a deleted row. Returns the row's id.
+   * use `null` to store an empty value. Returns the row's id.
    */
-  insert(table: string, values: Record<string, unknown>, options?: InsertOptions): Promise<string>;
+  insert(
+    table: string,
+    values: Record<string, unknown>,
+    options?: InsertOptions,
+  ): Promise<Result<string, InsertError>>;
   /**
    * Records one delta per column whose value changed. `id` and `undefined` values are ignored;
-   * use `null` to clear a column. Throws if the row does not exist. Does nothing if no column changed.
+   * use `null` to clear a column. Does nothing if no column changed.
    */
-  update(table: string, objectId: string, patch: Record<string, unknown>): Promise<void>;
+  update(
+    table: string,
+    objectId: string,
+    patch: Record<string, unknown>,
+  ): Promise<Result<void, UpdateError>>;
   /** Deletes the row and records a delete delta. Does nothing if the row does not exist. */
-  delete(table: string, objectId: string): Promise<void>;
+  delete(table: string, objectId: string): Promise<Result<void, DeleteError>>;
   /**
    * Pulls deltas from other nodes until the server has no more, then pushes the outbox until it is
    * empty. Each pulled page and its cursor commit together, so an interrupted sync resumes where it
    * stopped. Pushed deltas move to history only after the server accepts them; a push that fails or
    * loses its reply is sent again by the next sync, and the server ignores the repeat.
    *
-   * Throws without a transport, on transport errors, with `ClockDriftError` if a delta is too far
-   * in the future, and with `ServerProtocolError` if the server breaks the paging contract. Earlier
-   * pages and batches stay done; the failing one does not. Nothing is pushed if the pull fails.
+   * Earlier pages and batches stay done; the failing one does not. Nothing is pushed if the pull
+   * fails. Throws `ConfigError` without a transport.
    */
-  syncNow(): Promise<void>;
+  syncNow(): Promise<Result<void, SyncNowError>>;
 };
 
 type Fetched = { from: string | undefined; page: PullResult };
@@ -104,26 +137,54 @@ const setDeltas = (
     value,
   }));
 
-export const createSyncClient = async (options: SyncClientOptions): Promise<SyncClient> => {
-  const { storage } = options;
-  const generateId = options.generateId ?? defaultGenerateId;
-  const generateNodeId = options.generateNodeId ?? defaultGenerateId;
+type ResolvedOptions = SyncClientOptions & {
+  generateId: () => string;
+  generateNodeId: () => string;
+  pullLimit: number;
+  pushBatchSize: number;
+};
+
+/** Throws `ConfigError` for invalid options; returns other failures, like storage not opening. */
+export const createSyncClient = async (
+  options: SyncClientOptions,
+): Promise<Result<SyncClient, CreateError>> => {
   const pullLimit = options.pullLimit ?? 1000;
   if (!Number.isSafeInteger(pullLimit) || pullLimit < 1) {
-    throw new RangeError(`Invalid pullLimit: ${pullLimit}`);
+    throw new ConfigError(`Invalid pullLimit: ${pullLimit}`);
   }
   const pushBatchSize = options.pushBatchSize ?? 500;
   if (!Number.isSafeInteger(pushBatchSize) || pushBatchSize < 1) {
-    throw new RangeError(`Invalid pushBatchSize: ${pushBatchSize}`);
+    throw new ConfigError(`Invalid pushBatchSize: ${pushBatchSize}`);
   }
+  const { maxDriftMs } = options;
+  if (maxDriftMs !== undefined) {
+    assertMaxDriftMs(maxDriftMs, "client");
+  }
+  const generateId = options.generateId ?? requireRandomUUID();
+  const generateNodeId = options.generateNodeId ?? requireRandomUUID();
+
+  return toResult(() =>
+    openClient({ ...options, generateId, generateNodeId, pullLimit, pushBatchSize }),
+  );
+};
+
+const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
+  const { storage, generateId, generateNodeId, pullLimit, pushBatchSize } = options;
 
   // readwrite so two tabs starting at once agree on a single node id
   const nodeId = await storage.transaction("readwrite", async (tx) => {
     let saved = await tx.meta.get("nodeId");
     if (saved === undefined) {
-      saved = generateNodeId();
-      assertNodeId(saved);
+      const generated = generateNodeId();
+      if (!isValidNodeId(generated)) {
+        throw new ConfigError(
+          `generateNodeId returned an invalid nodeId: ${JSON.stringify(generated)}`,
+        );
+      }
+      saved = generated;
       await tx.meta.set("nodeId", saved);
+    } else if (!isValidNodeId(saved)) {
+      throw new CorruptStorageError(`Stored nodeId is corrupt: ${saved}`);
     }
 
     return saved;
@@ -144,7 +205,7 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
 
     const storedClock = HLCTimestamp.tryParse(stored);
     if (!storedClock) {
-      throw new Error(`Stored clock is corrupt: ${stored}`);
+      throw new CorruptStorageError(`Stored clock is corrupt: ${stored}`);
     }
 
     clock.observe(storedClock);
@@ -186,7 +247,12 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
 
   // Fetch outside any transaction: awaiting the network inside one can commit it early (IndexedDB)
   const fetchPage = async (transport: Transport, from: string | undefined): Promise<Fetched> => {
-    const page = await transport.pull({ cursor: from ?? null, nodeId, limit: pullLimit });
+    let page: PullResult;
+    try {
+      page = await transport.pull({ cursor: from ?? null, nodeId, limit: pullLimit });
+    } catch (error) {
+      throw new TransportError(error);
+    }
     if (page.hasMore && (page.cursor === null || page.cursor === from)) {
       throw new ServerProtocolError("Server reported more changes without advancing the cursor");
     }
@@ -252,7 +318,13 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
 
     // If this succeeds but the move below never happens,
     // the batch stays in the outbox and is pushed again; the server ignores timestamps it has.
-    await transport.push({ nodeId, deltas: batch });
+    try {
+      await transport.push({ nodeId, deltas: batch });
+    } catch (error) {
+      throw error instanceof ClockDriftError
+        ? new LocalClockAheadError(error)
+        : new TransportError(error);
+    }
 
     // Moving to history (not deleting) keeps these deltas counting for last-writer-wins
     const timestamps = batch.map((delta) => delta.timestamp);
@@ -264,70 +336,77 @@ export const createSyncClient = async (options: SyncClientOptions): Promise<Sync
   return {
     nodeId,
     insert: (table, values, insertOptions) =>
-      write(async ({ tx, tick }) => {
-        const suppliedId = insertOptions?.id;
-        const objectId = suppliedId ?? generateId();
+      toResult(() =>
+        write(async ({ tx, tick }) => {
+          const suppliedId = insertOptions?.id;
+          const objectId = suppliedId ?? generateId();
 
-        const current = await tx.rows.get(table, objectId);
-        if (current) {
-          throw new Error(`Row ${objectId} already exists in ${table}`);
-        }
-
-        if (suppliedId !== undefined) {
-          const deletedKeys = await tx.deleted([{ table, objectId }]);
-          if (deletedKeys.size > 0) {
-            throw new Error(`Row ${objectId} in ${table} was deleted and its id cannot be reused`);
+          const current = await tx.rows.get(table, objectId);
+          if (current) {
+            throw new RowError("row-exists", table, objectId);
           }
-        }
 
-        const columns = columnsOf(values);
-        if (Object.keys(columns).length === 0) {
-          throw new Error(`Cannot insert a row with no columns into ${table}`);
-        }
+          if (suppliedId !== undefined) {
+            const deletedKeys = await tx.deleted([{ table, objectId }]);
+            if (deletedKeys.size > 0) {
+              throw new RowError("row-deleted", table, objectId);
+            }
+          }
 
-        await tx.rows.upsert(table, objectId, columns);
-        await tx.outbox.add(setDeltas(table, objectId, columns, tick));
+          const columns = columnsOf(values);
+          if (Object.keys(columns).length === 0) {
+            throw new RowError("no-columns", table, objectId);
+          }
 
-        return objectId;
-      }),
+          await tx.rows.upsert(table, objectId, columns);
+          await tx.outbox.add(setDeltas(table, objectId, columns, tick));
+
+          return objectId;
+        }),
+      ),
     update: (table, objectId, patch) =>
-      write(async ({ tx, tick }) => {
-        const current = await tx.rows.get(table, objectId);
-        if (!current) {
-          throw new Error(`Row ${objectId} not found in ${table}`);
-        }
+      toResult(() =>
+        write(async ({ tx, tick }) => {
+          const current = await tx.rows.get(table, objectId);
+          if (!current) {
+            throw new RowError("row-not-found", table, objectId);
+          }
 
-        const columns = changedColumns(current, patch);
-        if (Object.keys(columns).length === 0) {
-          return;
-        }
+          const columns = changedColumns(current, patch);
+          if (Object.keys(columns).length === 0) {
+            return;
+          }
 
-        await tx.rows.upsert(table, objectId, columns);
-        await tx.outbox.add(setDeltas(table, objectId, columns, tick));
-      }),
+          await tx.rows.upsert(table, objectId, columns);
+          await tx.outbox.add(setDeltas(table, objectId, columns, tick));
+        }),
+      ),
     delete: (table, objectId) =>
-      write(async ({ tx, tick }) => {
-        const current = await tx.rows.get(table, objectId);
-        if (!current) {
-          return;
+      toResult(() =>
+        write(async ({ tx, tick }) => {
+          const current = await tx.rows.get(table, objectId);
+          if (!current) {
+            return;
+          }
+
+          await tx.rows.delete(table, objectId);
+          await tx.outbox.add([{ kind: "delete", timestamp: tick(), table, objectId }]);
+        }),
+      ),
+    syncNow: () =>
+      toResult(async () => {
+        const { transport } = options;
+        if (!transport) {
+          throw new ConfigError("Cannot sync without a transport");
         }
 
-        await tx.rows.delete(table, objectId);
-        await tx.outbox.add([{ kind: "delete", timestamp: tick(), table, objectId }]);
+        await pullAll(transport);
+
+        let pushed = true;
+        while (pushed) {
+          // oxlint-disable-next-line no-await-in-loop -- each batch is the oldest left after the last one moved
+          pushed = await pushBatch(transport);
+        }
       }),
-    syncNow: async () => {
-      const { transport } = options;
-      if (!transport) {
-        throw new Error("Cannot sync without a transport");
-      }
-
-      await pullAll(transport);
-
-      let pushed = true;
-      while (pushed) {
-        // oxlint-disable-next-line no-await-in-loop -- each batch is the oldest left after the last one moved
-        pushed = await pushBatch(transport);
-      }
-    },
   };
 };

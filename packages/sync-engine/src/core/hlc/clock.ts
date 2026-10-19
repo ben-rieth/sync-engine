@@ -1,3 +1,4 @@
+import { ConfigError, SyncError } from "../errors";
 import { assertNodeId } from "./node-id";
 import { HLCTimestamp, MAX_LOGICAL } from "./timestamp";
 
@@ -7,7 +8,8 @@ export type HybridLogicalClockOptions = {
   maxDriftMs?: number;
 };
 
-export class ClockDriftError extends Error {
+export class ClockDriftError extends SyncError {
+  readonly code = "remote-ahead" as const;
   readonly remote: HLCTimestamp;
   readonly wallTime: number;
 
@@ -21,11 +23,25 @@ export class ClockDriftError extends Error {
   }
 }
 
+/** The server refused a push because this device's clock is ahead of the server's. */
+export class LocalClockAheadError extends SyncError {
+  readonly code = "clock-ahead" as const;
+  /** How far the refused timestamp was ahead of the server's clock. */
+  readonly skewMs: number;
+
+  constructor(drift: ClockDriftError) {
+    const skewMs = drift.remote.physicalTime - drift.wallTime;
+    super(`Local clock is ${skewMs}ms ahead of the server`, { cause: drift });
+    this.name = "LocalClockAheadError";
+    this.skewMs = skewMs;
+  }
+}
+
 export const DEFAULT_MAX_DRIFT_MS: number = 5 * 60_000;
 
 export const assertMaxDriftMs = (maxDriftMs: number, owner: string): void => {
   if (maxDriftMs < 0 || Number.isNaN(maxDriftMs)) {
-    throw new RangeError(`Invalid ${owner} maxDriftMs: ${maxDriftMs}`);
+    throw new ConfigError(`Invalid ${owner} maxDriftMs: ${maxDriftMs}`);
   }
 };
 

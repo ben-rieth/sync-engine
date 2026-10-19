@@ -2,6 +2,7 @@ export { HLCTimestamp } from "./core/hlc/timestamp";
 export {
   HybridLogicalClock,
   ClockDriftError,
+  LocalClockAheadError,
   DEFAULT_MAX_DRIFT_MS,
   assertMaxDriftMs,
   assertWithinDrift,
@@ -10,10 +11,26 @@ export {
 
 export {
   createSyncClient,
+  type CreateError,
+  type DeleteError,
+  type InsertError,
   type InsertOptions,
   type SyncClient,
   type SyncClientOptions,
+  type SyncNowError,
+  type UpdateError,
 } from "./core/client/client";
+
+export {
+  ConfigError,
+  CorruptStorageError,
+  RowError,
+  SyncError,
+  TransportError,
+  UnexpectedError,
+  type RowErrorCode,
+} from "./core/errors";
+export type { Result } from "./core/result";
 
 export {
   deltaKey,
