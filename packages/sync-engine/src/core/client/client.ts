@@ -91,6 +91,10 @@ export type SyncClient = {
    *
    * Earlier pages and batches stay done; the failing one does not. Nothing is pushed if the pull
    * fails. Throws `ConfigError` without a transport.
+   *
+   * Only one sync runs at a time. A call made while one is running waits for it, then shares a
+   * single follow-up sync with every other call made meanwhile, so each call resolves only after a
+   * sync that started after it. The follow-up runs even if the earlier sync failed.
    */
   syncNow(): Promise<Result<void, SyncNowError>>;
 };
@@ -333,6 +337,29 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
     return true;
   };
 
+  const runSync = (transport: Transport): Promise<Result<void, SyncNowError>> =>
+    toResult(async () => {
+      await pullAll(transport);
+
+      let pushed = true;
+      while (pushed) {
+        // oxlint-disable-next-line no-await-in-loop -- each batch is the oldest left after the last one moved
+        pushed = await pushBatch(transport);
+      }
+    });
+
+  let running: Promise<Result<void, SyncNowError>> | undefined;
+  // One follow-up covers every call made during `running`: it starts after all of them
+  let queued: Promise<Result<void, SyncNowError>> | undefined;
+
+  const startSync = (transport: Transport) => {
+    const run = runSync(transport).finally(() => {
+      running = undefined;
+    });
+    running = run;
+    return run;
+  };
+
   return {
     nodeId,
     insert: (table, values, insertOptions) =>
@@ -393,20 +420,26 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
           await tx.outbox.add([{ kind: "delete", timestamp: tick(), table, objectId }]);
         }),
       ),
-    syncNow: () =>
-      toResult(async () => {
-        const { transport } = options;
-        if (!transport) {
-          throw new ConfigError("Cannot sync without a transport");
-        }
+    syncNow: async () => {
+      const { transport } = options;
+      if (!transport) {
+        throw new ConfigError("Cannot sync without a transport");
+      }
 
-        await pullAll(transport);
+      if (queued) {
+        return queued;
+      }
+      if (!running) {
+        return startSync(transport);
+      }
 
-        let pushed = true;
-        while (pushed) {
-          // oxlint-disable-next-line no-await-in-loop -- each batch is the oldest left after the last one moved
-          pushed = await pushBatch(transport);
-        }
-      }),
+      // Start the follow-up whether `running` resolves or rejects, so the queue never stalls
+      const startFollowUp = () => {
+        queued = undefined;
+        return startSync(transport);
+      };
+      queued = running.then(startFollowUp, startFollowUp);
+      return queued;
+    },
   };
 };

@@ -128,6 +128,15 @@ const serverDeltas = async (server: ServerDatabaseAdapter): Promise<Delta[]> => 
   return page.deltas;
 };
 
+// Tests run on Node, but the ES-only lib has no timer types
+declare const setTimeout: (callback: () => void, ms: number) => unknown;
+
+// Memory adapters only use microtasks, so after a timer anything that can run has run
+const settle = () =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
+
 describe("syncNow pulling", () => {
   it("throws without a transport", async () => {
     const { client } = await setup({ transport: undefined });
@@ -869,5 +878,88 @@ describe("syncNow pushing", () => {
     expectTypeOf((error: SyncNowError) =>
       error.code === "clock-ahead" ? error.skewMs : null,
     ).returns.toEqualTypeOf<number | null>();
+  });
+});
+
+describe("syncNow while syncing", () => {
+  it("waits for the running sync to finish before starting another", async () => {
+    const { client, spy } = await setup();
+    const calls: Promise<void>[] = [];
+    let pullsDuringFirst = 0;
+    spy.beforeReturn = async () => {
+      spy.beforeReturn = undefined;
+      calls.push(client.syncNow());
+      await settle();
+      pullsDuringFirst = spy.pulls;
+    };
+
+    await client.syncNow();
+    await Promise.all(calls);
+
+    expect(pullsDuringFirst).toBe(1);
+    expect(spy.pulls).toBe(2);
+  });
+
+  it("runs one follow-up sync for every call made during a sync", async () => {
+    const { client, spy } = await setup();
+    const calls: Promise<void>[] = [];
+    spy.beforeReturn = async () => {
+      spy.beforeReturn = undefined;
+      calls.push(client.syncNow(), client.syncNow(), client.syncNow());
+    };
+
+    await client.syncNow();
+    await Promise.all(calls);
+
+    expect(spy.pulls).toBe(2);
+  });
+
+  it("pulls changes that reached the server mid-sync before a later call resolves", async () => {
+    const { client, storage, spy, remote } = await setup();
+    await client.insert(TABLE, { title: "local" }, { id: "obj-1" });
+    const calls: Promise<void>[] = [];
+    // The first sync has finished pulling by the time it pushes
+    spy.afterPush = async () => {
+      spy.afterPush = undefined;
+      await remote(set(START - 1, "obj-2", "title", "remote"));
+      calls.push(client.syncNow());
+    };
+
+    await client.syncNow();
+    await Promise.all(calls);
+    const pulled = await row(storage, "obj-2");
+
+    expect(pulled).toEqual({ id: "obj-2", title: "remote" });
+  });
+
+  it("runs a call made during a failed sync, and reports each result separately", async () => {
+    const { client, spy } = await setup();
+    const calls: ReturnType<typeof client.raw.syncNow>[] = [];
+    spy.beforeReturn = async () => {
+      spy.beforeReturn = undefined;
+      calls.push(client.raw.syncNow());
+      throw new Error("offline");
+    };
+
+    await failedBecause(client.raw.syncNow(), "transport", "offline");
+    const [followUp] = await Promise.all(calls);
+
+    expect(followUp?.error).toBeNull();
+    expect(spy.pulls).toBe(2);
+  });
+
+  it("starts a new sync for a call made after the follow-up finished", async () => {
+    const { client, spy } = await setup();
+    const calls: Promise<void>[] = [];
+    spy.beforeReturn = async () => {
+      spy.beforeReturn = undefined;
+      calls.push(client.syncNow());
+    };
+
+    await client.syncNow();
+    await Promise.all(calls);
+    await client.syncNow();
+
+    expect(spy.pulls).toBe(3);
   });
 });
