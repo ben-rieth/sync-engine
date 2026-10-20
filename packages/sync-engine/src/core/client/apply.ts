@@ -1,7 +1,5 @@
 import { deltaKey, type Delta } from "../delta";
-import { HLCTimestamp } from "../hlc/timestamp";
 import { planMerge } from "../merge";
-import { ServerProtocolError } from "../server/server";
 import { objectKey } from "../object";
 import type { StorageTx } from "../storage";
 
@@ -23,12 +21,6 @@ export const applyRemoteDeltas = async (
     return;
   }
 
-  for (const delta of deltas) {
-    // Merge orders and dedups by raw string, so reject malformed timestamps
-    if (!HLCTimestamp.tryParse(delta.timestamp)) {
-      throw new ServerProtocolError(`Server sent an invalid timestamp: ${delta.timestamp}`);
-    }
-  }
   // A page often holds many deltas per row and cell, so look each up once
   const cells = uniqueBy(
     deltas.filter((delta) => delta.kind === "set"),

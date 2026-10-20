@@ -1,4 +1,4 @@
-import type { Delta } from "../delta";
+import { parseDelta, type Delta } from "../delta";
 import {
   ConfigError,
   CorruptStorageError,
@@ -8,12 +8,13 @@ import {
 } from "../errors";
 import {
   assertMaxDriftMs,
-  ClockDriftError,
+  type ClockDriftError,
   HybridLogicalClock,
   LocalClockAheadError,
 } from "../hlc/clock";
 import { isValidNodeId } from "../hlc/node-id";
 import { HLCTimestamp } from "../hlc/timestamp";
+import { parsePullResponse } from "../protocol";
 import { toResult, type Result } from "../result";
 import { ServerProtocolError, type PullResult } from "../server/server";
 import type { Transport } from "../server/transport";
@@ -99,7 +100,7 @@ export type SyncClient = {
   syncNow(): Promise<Result<void, SyncNowError>>;
 };
 
-type Fetched = { from: string | undefined; page: PullResult };
+type Fetched = { from: string | undefined; page: PullResult<Delta> };
 type Saved = { applied: boolean; cursor: string | undefined };
 
 type WriteContext = {
@@ -140,6 +141,25 @@ const setDeltas = (
     column,
     value,
   }));
+
+// Any transport may relay a malformed server response
+const parsePage = (response: PullResult): PullResult<Delta> => {
+  const envelope = parsePullResponse(response);
+  if (!envelope.ok) {
+    throw new ServerProtocolError(`Server sent an invalid page: ${envelope.reason}`);
+  }
+
+  const deltas: Delta[] = [];
+  for (const wire of envelope.value.deltas) {
+    const delta = parseDelta(wire);
+    if (!delta.ok) {
+      throw new ServerProtocolError(`Server sent an invalid delta: ${delta.reason}`);
+    }
+    deltas.push(delta.value);
+  }
+
+  return { ...envelope.value, deltas };
+};
 
 type ResolvedOptions = SyncClientOptions & {
   generateId: () => string;
@@ -251,13 +271,14 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
 
   // Fetch outside any transaction: awaiting the network inside one can commit it early (IndexedDB)
   const fetchPage = async (transport: Transport, from: string | undefined): Promise<Fetched> => {
-    let page: PullResult;
+    let response: PullResult;
     try {
-      page = await transport.pull({ cursor: from ?? null, nodeId, limit: pullLimit });
+      response = await transport.pull({ cursor: from ?? null, nodeId, limit: pullLimit });
     } catch (error) {
       throw new TransportError(error);
     }
-    if (page.hasMore && (page.cursor === null || page.cursor === from)) {
+    const page = parsePage(response);
+    if (page.hasMore && page.cursor === from) {
       throw new ServerProtocolError("Server reported more changes without advancing the cursor");
     }
 
@@ -325,9 +346,7 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
     try {
       await transport.push({ nodeId, deltas: batch });
     } catch (error) {
-      throw error instanceof ClockDriftError
-        ? new LocalClockAheadError(error)
-        : new TransportError(error);
+      throw error instanceof LocalClockAheadError ? error : new TransportError(error);
     }
 
     // Moving to history (not deleting) keeps these deltas counting for last-writer-wins

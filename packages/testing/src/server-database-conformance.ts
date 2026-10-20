@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  ClockDriftError,
   HLCTimestamp,
+  InvalidCursorError,
   type Delta,
   type PullResult,
   type ServerDatabaseAdapter,
+  type WireDelta,
 } from "@sync-engine/core";
 
 export type ServerDatabaseConformanceOptions = {
@@ -12,8 +13,6 @@ export type ServerDatabaseConformanceOptions = {
   create: () => ServerDatabaseAdapter | Promise<ServerDatabaseAdapter>;
   /** Called after each test. */
   destroy?: (adapter: ServerDatabaseAdapter) => void | Promise<void>;
-  /** The max clock drift the adapter was created with. Default 5 minutes. */
-  maxDriftMs?: number;
   /** Cursors the adapter must reject; formats are adapter-specific. Default ["not-a-cursor"]. */
   invalidCursors?: readonly string[];
 };
@@ -30,7 +29,7 @@ const delta = (physical: number, node = "node-a", value: unknown = physical): De
   value,
 });
 
-const timestamps = (deltas: Delta[]) => deltas.map((d) => d.timestamp);
+const timestamps = (deltas: WireDelta[]) => deltas.map((d) => d.timestamp);
 
 /**
  * Runs the black-box `ServerDatabaseAdapter` contract tests. Cursors are opaque: tests only
@@ -40,7 +39,6 @@ export const runServerDatabaseConformance = (
   name: string,
   options: ServerDatabaseConformanceOptions,
 ): void => {
-  const maxDriftMs = options.maxDriftMs ?? 5 * 60_000;
   const invalidCursors = options.invalidCursors ?? ["not-a-cursor"];
 
   describe(`ServerDatabaseAdapter conformance: ${name}`, () => {
@@ -78,7 +76,7 @@ export const runServerDatabaseConformance = (
       { userId = "user-1", excludeNodeId = "node-z", limit = 2 } = {},
     ) => {
       let cursor = startCursor;
-      const seen: Delta[] = [];
+      const seen: WireDelta[] = [];
       let pages = 0;
       let page: PullResult;
       do {
@@ -177,16 +175,6 @@ export const runServerDatabaseConformance = (
         const bad = { ...delta(2), timestamp: "not-a-timestamp" };
 
         await expect(push([delta(1), bad])).rejects.toThrow("Invalid HLC timestamp");
-
-        const page = await pull();
-
-        expect(page.deltas).toEqual([]);
-      });
-
-      it("rejects the whole batch if one timestamp is too far ahead of the server clock", async () => {
-        const future = Date.now() + maxDriftMs + 60_000;
-
-        await expect(push([delta(1), delta(future)])).rejects.toBeInstanceOf(ClockDriftError);
 
         const page = await pull();
 
@@ -310,7 +298,7 @@ export const runServerDatabaseConformance = (
 
       it("never skips a delta while pushes and pulls run concurrently", async () => {
         const all = Array.from({ length: 20 }, (_, i) => delta(i + 1, `node-${i % 4}`));
-        const seen: Delta[] = [];
+        const seen: WireDelta[] = [];
         let cursor: string | null = null;
         const drain = async () => {
           const result = await pullAll(cursor, { limit: 3 });
@@ -358,7 +346,7 @@ export const runServerDatabaseConformance = (
 
         await Promise.all(
           invalidCursors.map((cursor) =>
-            expect(pull(cursor), cursor).rejects.toBeInstanceOf(RangeError),
+            expect(pull(cursor), cursor).rejects.toBeInstanceOf(InvalidCursorError),
           ),
         );
       });

@@ -1,6 +1,6 @@
 import { expect } from "vitest";
 import { createSyncClient, type SyncClient, type SyncClientOptions } from "#core/client/client";
-import type { Delta } from "#core/delta";
+import { parseDelta, type Delta, type WireDelta } from "#core/delta";
 import type { SyncError } from "#core/errors";
 import { HLCTimestamp } from "#core/hlc/timestamp";
 import type { Result } from "#core/result";
@@ -17,7 +17,7 @@ export const delta = (physical: number, node = "node-a", value: unknown = physic
   value,
 });
 
-export const timestamps = (deltas: Delta[]): string[] => deltas.map((d) => d.timestamp);
+export const timestamps = (deltas: WireDelta[]): string[] => deltas.map((d) => d.timestamp);
 
 export const read = <T>(storage: StorageAdapter, fn: (tx: StorageTx) => Promise<T>): Promise<T> =>
   storage.transaction("read", fn);
@@ -28,7 +28,13 @@ export const serverDeltas = async (
   user = "user-1",
 ): Promise<Delta[]> => {
   const page = await server.pull(user, { cursor: null, excludeNodeId: "node-z", limit: 100_000 });
-  return page.deltas;
+  return page.deltas.map((wire) => {
+    const parsed = parseDelta(wire);
+    if (!parsed.ok) {
+      throw new Error(parsed.reason);
+    }
+    return parsed.value;
+  });
 };
 
 /** Returns `list[index]`, throwing instead of returning undefined when it is out of range. */

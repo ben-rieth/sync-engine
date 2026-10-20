@@ -61,7 +61,7 @@ const network = async <const N extends string>(
   options: NetworkOptions = {},
 ): Promise<Network<N>> => {
   let time = START;
-  const server = serverMemoryDatabase({ now: () => time });
+  const server = serverMemoryDatabase();
 
   const openDevice = async (name: N): Promise<[N, Device]> => {
     const skew = options.skews?.[name] ?? 0;

@@ -1,13 +1,16 @@
-import type { Delta } from "#core/delta";
-import { assertMaxDriftMs, assertWithinDrift, DEFAULT_MAX_DRIFT_MS } from "#core/hlc/clock";
+import type { WireDelta } from "#core/delta";
 import { HLCTimestamp } from "#core/hlc/timestamp";
-import type { PullResult, ServerDatabaseAdapter } from "#core/server/server";
-import { cloneJson } from "#utils/json";
+import {
+  InvalidCursorError,
+  type PullResult,
+  type ServerDatabaseAdapter,
+} from "#core/server/server";
+import { cloneJson, quote } from "#utils/json";
 
 type LogEntry = {
   // Global across users and never reused, like a Postgres bigserial
   sequence: number;
-  delta: Delta;
+  delta: WireDelta;
   // Parsed on push so pulls don't re-parse timestamps
   nodeId: string;
 };
@@ -27,7 +30,7 @@ const parseCursor = (cursor: string | null): number => {
 
   const sequence = Number(cursor);
   if (!/^\d+$/.test(cursor) || !Number.isSafeInteger(sequence)) {
-    throw new RangeError(`Invalid cursor: ${cursor}`);
+    throw new InvalidCursorError(`Invalid cursor: ${quote(cursor)}`);
   }
 
   return sequence;
@@ -39,17 +42,7 @@ const assertLimit = (limit: number) => {
   }
 };
 
-export type ServerMemoryDatabaseOptions = {
-  now?: () => number;
-  maxDriftMs?: number;
-};
-
-export const serverMemoryDatabase = ({
-  now = Date.now,
-  maxDriftMs = DEFAULT_MAX_DRIFT_MS,
-}: ServerMemoryDatabaseOptions = {}): ServerDatabaseAdapter & { state: ServerMemoryState } => {
-  assertMaxDriftMs(maxDriftMs, "server");
-
+export const serverMemoryDatabase = (): ServerDatabaseAdapter & { state: ServerMemoryState } => {
   const state: ServerMemoryState = new Map();
   let lastSequence = 0;
 
@@ -65,16 +58,11 @@ export const serverMemoryDatabase = ({
 
   return {
     push: async (userId, deltas) => {
-      // Validate everything before writing so one bad delta rejects the whole push
-      const wallTime = now();
-      const parsed: Omit<LogEntry, "sequence">[] = [];
-      for (const delta of deltas) {
-        const timestamp = HLCTimestamp.parse(delta.timestamp);
-        // A far-ahead client clock would otherwise poison the log
-        assertWithinDrift(timestamp, wallTime, maxDriftMs);
-
-        parsed.push({ delta: cloneJson(delta), nodeId: timestamp.nodeId });
-      }
+      // Parse everything before writing so one bad delta rejects the whole push
+      const parsed = deltas.map((delta) => ({
+        delta: cloneJson(delta),
+        nodeId: HLCTimestamp.parse(delta.timestamp).nodeId,
+      }));
 
       const log = userLog(userId);
       for (const { delta, nodeId } of parsed) {
@@ -101,7 +89,7 @@ export const serverMemoryDatabase = ({
       }
       let cursor = after;
 
-      const deltas: Delta[] = [];
+      const deltas: WireDelta[] = [];
       // The cursor also advances past the caller's own deltas, including trailing ones, so pages
       // of only own deltas still progress and `hasMore` means there is something to return.
       for (; position < entries.length; position++) {

@@ -1,9 +1,8 @@
 // The contract is covered by runServerDatabaseConformance in packages/testing.
-// These pin memory-adapter specifics: cursor values and the injectable clock.
+// These pin memory-adapter specifics: cursor values and duplicate handling.
 import { describe, expect, it } from "vitest";
 import { serverMemoryDatabase } from "#adapters/server-memory";
-import { ClockDriftError } from "#core/hlc/clock";
-import { delta, timestamps } from "../helpers";
+import { delta } from "../helpers";
 
 const pull = (
   db: ReturnType<typeof serverMemoryDatabase>,
@@ -12,28 +11,6 @@ const pull = (
 ) => db.pull(userId, { cursor, excludeNodeId, limit });
 
 describe("serverMemoryDatabase", () => {
-  it("rejects an invalid maxDriftMs", () => {
-    for (const maxDriftMs of [-1, Number.NaN]) {
-      expect(() => serverMemoryDatabase({ maxDriftMs })).toThrow("Invalid server maxDriftMs");
-    }
-  });
-
-  it("rejects a timestamp just past the drift limit", async () => {
-    const db = serverMemoryDatabase({ now: () => 1_000, maxDriftMs: 100 });
-
-    await expect(db.push("user-1", [delta(1_101)])).rejects.toBeInstanceOf(ClockDriftError);
-  });
-
-  it("accepts a timestamp exactly at the drift limit", async () => {
-    const db = serverMemoryDatabase({ now: () => 1_000, maxDriftMs: 100 });
-
-    await db.push("user-1", [delta(1_100)]);
-
-    const page = await pull(db);
-
-    expect(timestamps(page.deltas)).toEqual(timestamps([delta(1_100)]));
-  });
-
   it("keeps the first delta when a timestamp is pushed again with different content", async () => {
     const db = serverMemoryDatabase();
 

@@ -39,14 +39,32 @@ export {
   type Delta,
   type DeltaKey,
   type SetDelta,
+  type WireDelta,
 } from "./core/delta";
+export {
+  PROTOCOL_HEADER,
+  PROTOCOL_VERSION,
+  type ErrorBody,
+  type ProtocolErrorCode,
+  type PushBody,
+} from "./core/protocol";
 export { objectKey, type ObjectKey, type ObjectRef } from "./core/object";
 
 export type { MetaKey, StorageAdapter, StorageTx, TransactionMode } from "./core/storage";
 export {
+  InvalidCursorError,
   ServerProtocolError,
   type PullRequest,
   type PullResult,
   type ServerDatabaseAdapter,
 } from "./core/server/server";
+export {
+  createSyncServer,
+  type SyncRequest,
+  type SyncResponse,
+  type SyncServer,
+  type SyncServerHooks,
+  type SyncServerLimits,
+  type SyncServerOptions,
+} from "./core/server/sync-server";
 export type { Transport } from "./core/server/transport";

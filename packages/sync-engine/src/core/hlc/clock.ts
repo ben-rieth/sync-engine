@@ -29,9 +29,8 @@ export class LocalClockAheadError extends SyncError {
   /** How far the refused timestamp was ahead of the server's clock. */
   readonly skewMs: number;
 
-  constructor(drift: ClockDriftError) {
-    const skewMs = drift.remote.physicalTime - drift.wallTime;
-    super(`Local clock is ${skewMs}ms ahead of the server`, { cause: drift });
+  constructor(skewMs: number) {
+    super(`Local clock is ${skewMs}ms ahead of the server`);
     this.name = "LocalClockAheadError";
     this.skewMs = skewMs;
   }

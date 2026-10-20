@@ -1,15 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { serverMemoryDatabase } from "#adapters/server-memory";
 import { memoryTransport } from "#adapters/transport-memory";
-import type { Delta } from "#core/delta";
+import type { WireDelta } from "#core/delta";
 import type { PullRequest, ServerDatabaseAdapter } from "#core/server/server";
 import { delta, timestamps } from "../helpers";
 
 // Records calls and returns shared objects, so tests can see whether the transport copies
 const spyServer = () => {
-  const pushes: { userId: string; deltas: Delta[] }[] = [];
+  const pushes: { userId: string; deltas: WireDelta[] }[] = [];
   const pulls: { userId: string; request: PullRequest }[] = [];
-  const stored: Delta[] = [];
+  const stored: WireDelta[] = [];
 
   const server: ServerDatabaseAdapter = {
     push: async (userId, deltas) => {

@@ -1,11 +1,11 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { clientMemoryStorage } from "#adapters/client-memory";
-import { serverMemoryDatabase, type ServerMemoryDatabaseOptions } from "#adapters/server-memory";
+import { serverMemoryDatabase } from "#adapters/server-memory";
 import { memoryTransport } from "#adapters/transport-memory";
 import { type SyncClientOptions, type SyncNowError } from "#core/client/client";
 import type { Delta } from "#core/delta";
 import { ConfigError, TransportError } from "#core/errors";
-import { ClockDriftError, LocalClockAheadError } from "#core/hlc/clock";
+import { LocalClockAheadError } from "#core/hlc/clock";
 import { compareTimestamps, HLCTimestamp } from "#core/hlc/timestamp";
 import type { PullResult } from "#core/server/server";
 import type { Transport } from "#core/server/transport";
@@ -77,12 +77,9 @@ const scriptedTransport = (pages: PullResult[]): Transport => ({
 });
 
 // One local client ("node-a") on a memory server; `remote` pushes deltas as another device would.
-const setup = async (
-  overrides: Partial<SyncClientOptions> = {},
-  serverOptions: ServerMemoryDatabaseOptions = {},
-) => {
+const setup = async (overrides: Partial<SyncClientOptions> = {}) => {
   const storage = clientMemoryStorage();
-  const server = serverMemoryDatabase(serverOptions);
+  const server = serverMemoryDatabase();
   const spy = spyTransport(memoryTransport(server, USER));
   let time = START;
   const options: SyncClientOptions = {
@@ -625,6 +622,37 @@ describe("syncNow pulling", () => {
       expect(validRow).toBeUndefined();
       expect(savedCursor).toBeUndefined();
     });
+
+    it("rejects a page containing a delta it cannot read and changes nothing", async () => {
+      const valid = set(START - 1, "obj-1", "title", "fine");
+      const unreadable = { timestamp: ts(START - 1, "node-c"), payload: "ciphertext" };
+      const { client, storage } = await setup({
+        transport: scriptedTransport([
+          { deltas: [valid, unreadable], cursor: "2", hasMore: false },
+        ]),
+      });
+
+      await failed(client.raw.syncNow(), "server-protocol");
+      const validRow = await row(storage, "obj-1");
+      const savedCursor = await cursor(storage);
+
+      expect(validRow).toBeUndefined();
+      expect(savedCursor).toBeUndefined();
+    });
+
+    it("stores only the known fields of a pulled delta", async () => {
+      const pulled = set(START - 1, "obj-1", "title", "hello");
+      const { client, storage } = await setup({
+        transport: scriptedTransport([
+          { deltas: [{ ...pulled, extra: "junk" }], cursor: "1", hasMore: false },
+        ]),
+      });
+
+      await client.syncNow();
+      const recorded = [...storage.state.history.values()];
+
+      expect(recorded).toEqual([pulled]);
+    });
   });
 });
 
@@ -793,16 +821,19 @@ describe("syncNow pushing", () => {
   });
 
   it("reports a device clock ahead of the server", async () => {
-    const { client, storage, setTime } = await setup({}, { now: () => START, maxDriftMs: 1000 });
-    setTime(START + 3000);
+    const { client, storage, spy } = await setup();
     await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
     const pending = await outbox(storage);
+    const refusal = new LocalClockAheadError(3000);
+    spy.beforePush = async () => {
+      throw refusal;
+    };
 
     const error = await failed(client.raw.syncNow(), "clock-ahead");
     const remaining = await outbox(storage);
 
-    expect(error).toBeInstanceOf(LocalClockAheadError);
-    expect(error).toMatchObject({ skewMs: 3000, cause: expect.any(ClockDriftError) });
+    expect(error).toBe(refusal);
+    expect(error).toMatchObject({ skewMs: 3000 });
     expect(remaining).toEqual(pending);
   });
 
@@ -843,12 +874,12 @@ describe("syncNow pushing", () => {
     expect(error).toBeInstanceOf(TransportError);
   });
 
-  it("reports a clock drift thrown synchronously by push as a local clock ahead", async () => {
-    const drift = new ClockDriftError(new HLCTimestamp(START + 3000, 0, "node-a"), START);
+  it("reports a local clock ahead thrown synchronously by push", async () => {
+    const refusal = new LocalClockAheadError(3000);
     const transport: Transport = {
       pull: async () => ({ deltas: [], cursor: null, hasMore: false }),
       push: () => {
-        throw drift;
+        throw refusal;
       },
     };
     const client = await openClient({
@@ -860,7 +891,7 @@ describe("syncNow pushing", () => {
 
     const error = await failed(client.raw.syncNow(), "clock-ahead");
 
-    expect(error).toMatchObject({ skewMs: 3000, cause: drift });
+    expect(error).toBe(refusal);
   });
 
   it("narrows sync errors by code", () => {
