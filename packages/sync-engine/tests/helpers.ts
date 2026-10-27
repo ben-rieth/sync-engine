@@ -91,7 +91,9 @@ export type UnwrappedClient = {
 
 /** For arrange steps: a failing setup call fails the test. Use `raw` to assert on a Result. */
 export const unwrapped = (client: SyncClient): UnwrappedClient => ({
-  nodeId: client.nodeId,
+  get nodeId() {
+    return client.nodeId;
+  },
   raw: client,
   insert: (...args) => ok(client.insert(...args)),
   update: (...args) => ok(client.update(...args)),

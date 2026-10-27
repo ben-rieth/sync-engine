@@ -15,8 +15,9 @@ import {
   type PullResult,
   type ServerDatabaseAdapter,
 } from "#core/server/server";
-import { depthExceeds, quote } from "#utils/json";
+import { depthExceeds, isRecord, quote } from "#utils/json";
 import { fail, ok, type Parsed } from "#utils/parsed";
+import { isNonEmptyString } from "#utils/string";
 import { webGlobals, type WebHeaders, type WebResponse } from "#utils/web";
 
 const MAX_JSON_DEPTH = 128;
@@ -51,7 +52,7 @@ export type SyncServerHooks = {
 
 export type SyncServerOptions = {
   database: ServerDatabaseAdapter;
-  getUserId: (request: SyncRequest) => string | null | Promise<string | null>;
+  getSession: (request: SyncRequest) => SyncSession | null | Promise<SyncSession | null>;
   basePath?: string;
   limits?: Partial<SyncServerLimits>;
   hooks?: SyncServerHooks;
@@ -59,6 +60,12 @@ export type SyncServerOptions = {
 };
 
 export type SyncServer = { handler: (request: SyncRequest) => Promise<SyncResponse> };
+
+export type SyncSession = {
+  userId: string;
+  /** Must come from the authenticated credential (e.g. the session id), never from the request, and be unique per install. */
+  deviceId: string;
+};
 
 const resolveLimits = ({
   maxPullLimit = 1000,
@@ -83,6 +90,10 @@ const resolveBasePath = (basePath: string): string => {
   }
   return basePath.replace(/\/+$/, "");
 };
+
+// `unknown` because a JavaScript host can return anything, e.g. `undefined`
+const isSession = (session: unknown): session is SyncSession =>
+  isRecord(session) && isNonEmptyString(session.userId) && isNonEmptyString(session.deviceId);
 
 // `null` once past `maxBytes`, leaving the rest unread
 const readBytes = async (
@@ -121,7 +132,7 @@ const readBytes = async (
 
 export const createSyncServer = ({
   database,
-  getUserId,
+  getSession,
   basePath = "/api/sync",
   limits: limitOptions = {},
   hooks = {},
@@ -162,7 +173,7 @@ export const createSyncServer = ({
     return null;
   };
 
-  const push = async (request: SyncRequest, userId: string): Promise<SyncResponse> => {
+  const push = async (request: SyncRequest, session: SyncSession): Promise<SyncResponse> => {
     const tooLarge = `Body is larger than ${limits.maxBodyBytes} bytes`;
     const length = request.headers.get("content-length");
     if (length !== null && Number(length) > limits.maxBodyBytes) {
@@ -200,7 +211,13 @@ export const createSyncServer = ({
     }
 
     if (deltas.length > 0) {
-      await database.push(userId, deltas);
+      // After every other check, so a refused push claims nothing
+      const owned = await database.claimNode(session.userId, nodeId, session.deviceId);
+      if (!owned) {
+        return refuse("node-claimed", `Node ${quote(nodeId)} belongs to another device`);
+      }
+
+      await database.push(session.userId, deltas);
     }
     return reply(204);
   };
@@ -244,12 +261,12 @@ export const createSyncServer = ({
     if (request.headers.get(PROTOCOL_HEADER) !== String(PROTOCOL_VERSION)) {
       return refuse("protocol", `Expected ${PROTOCOL_HEADER}: ${PROTOCOL_VERSION}`);
     }
-    const userId = await getUserId(request);
-    if (typeof userId !== "string" || userId === "") {
+    const session = await getSession(request);
+    if (!isSession(session)) {
       return refuse("unauthorized", "Not signed in");
     }
 
-    return route === "push" ? push(request, userId) : pull(url.searchParams, userId);
+    return route === "push" ? push(request, session) : pull(url.searchParams, session.userId);
   };
 
   const report = async (error: unknown, request: SyncRequest) => {

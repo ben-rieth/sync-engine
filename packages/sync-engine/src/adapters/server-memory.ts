@@ -19,6 +19,7 @@ type UserLog = {
   // Append-only, so sequences ascend
   entries: LogEntry[];
   storedTimestamps: Set<string>;
+  nodeOwners: Map<string, string>;
 };
 
 type ServerMemoryState = Map<string, UserLog>;
@@ -49,7 +50,7 @@ export const serverMemoryDatabase = (): ServerDatabaseAdapter & { state: ServerM
   const userLog = (userId: string) => {
     let log = state.get(userId);
     if (!log) {
-      log = { entries: [], storedTimestamps: new Set() };
+      log = { entries: [], storedTimestamps: new Set(), nodeOwners: new Map() };
       state.set(userId, log);
     }
 
@@ -112,6 +113,18 @@ export const serverMemoryDatabase = (): ServerDatabaseAdapter & { state: ServerM
 
     deleteUser: async (userId) => {
       state.delete(userId);
+    },
+
+    // No await inside, so check-and-set is atomic
+    claimNode: async (userId, nodeId, deviceId) => {
+      const { nodeOwners } = userLog(userId);
+      const owner = nodeOwners.get(nodeId);
+      if (owner === undefined) {
+        nodeOwners.set(nodeId, deviceId);
+        return true;
+      }
+
+      return owner === deviceId;
     },
 
     state,

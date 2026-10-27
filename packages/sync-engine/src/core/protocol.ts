@@ -19,6 +19,7 @@ export const ERROR_STATUS = {
   "bad-request": 400,
   "node-mismatch": 400,
   "clock-ahead": 409,
+  "node-claimed": 403,
   internal: 500,
 } as const;
 

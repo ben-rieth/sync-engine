@@ -78,6 +78,12 @@ const createTx = (getState: () => MemoryState, mode: TransactionMode): StorageTx
           }
         }
       },
+      delete: async (timestamps) => {
+        const { outbox } = writable();
+        for (const timestamp of timestamps) {
+          outbox.delete(timestamp);
+        }
+      },
     },
     history: {
       add: async (deltas) => {

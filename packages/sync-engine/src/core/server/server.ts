@@ -29,5 +29,8 @@ export class InvalidCursorError extends Error {
 export type ServerDatabaseAdapter = {
   push(userId: string, deltas: WireDelta[]): Promise<void>;
   pull(userId: string, request: PullRequest): Promise<PullResult>;
+  /** Also drops the user's node claims. */
   deleteUser(userId: string): Promise<void>;
+  /** Atomic insert-if-absent: the first device to claim a node id owns it. True if `deviceId` does. */
+  claimNode(userId: string, nodeId: string, deviceId: string): Promise<boolean>;
 };

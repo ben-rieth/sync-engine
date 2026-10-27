@@ -65,3 +65,15 @@ export class UnexpectedError extends SyncError {
     this.name = "UnexpectedError";
   }
 }
+
+/** The server refused a push because another device owns the node id. Transports throw this. */
+export class NodeClaimedError extends SyncError {
+  readonly code = "node-claimed" as const;
+  readonly nodeId: string;
+
+  constructor(nodeId: string) {
+    super(`Node ${nodeId} belongs to another device`);
+    this.name = "NodeClaimedError";
+    this.nodeId = nodeId;
+  }
+}

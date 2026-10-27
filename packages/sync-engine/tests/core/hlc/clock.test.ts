@@ -392,6 +392,35 @@ describe("HybridLogicalClock", () => {
     });
   });
 
+  describe("withNodeId", () => {
+    it("continues from the same time under the new node", () => {
+      const { clock } = createClock({ last: ts(2000, 5) });
+
+      const moved = clock.withNodeId(REMOTE);
+
+      expectTimestamp(moved.last(), 2000, 5, REMOTE);
+      expectTimestamp(moved.tick(), 2000, 6, REMOTE);
+    });
+
+    it("keeps the wall clock and drift limit", () => {
+      const { clock, setTime } = createClock({ maxDriftMs: 100 });
+
+      const moved = clock.withNodeId(REMOTE);
+      setTime(5000);
+
+      expectTimestamp(moved.tick(), 5000, 0, REMOTE);
+      expect(() => moved.receive(ts(5101, 0, "other"))).toThrow(ClockDriftError);
+    });
+
+    it("leaves the original clock unchanged", () => {
+      const { clock } = createClock({ last: ts(2000, 5) });
+
+      clock.withNodeId(REMOTE).tick();
+
+      expectTimestamp(clock.last(), 2000, 5);
+    });
+  });
+
   describe("toString", () => {
     const cases = [
       {

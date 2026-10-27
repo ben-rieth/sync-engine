@@ -34,6 +34,8 @@ export type StorageTx = {
     count(): Promise<number>;
     /** Called after a successful push. Timestamps not in the outbox are ignored. */
     moveToHistory(timestamps: string[]): Promise<void>;
+    /** Drops these outbox deltas without moving them to history. Timestamps not in the outbox are ignored. */
+    delete(timestamps: string[]): Promise<void>;
   };
 
   /** Every delta this device has applied or pushed, for last-writer-wins and deduplication. */

@@ -24,6 +24,7 @@ export {
 export {
   ConfigError,
   CorruptStorageError,
+  NodeClaimedError,
   RowError,
   SyncError,
   TransportError,
@@ -66,5 +67,6 @@ export {
   type SyncServerHooks,
   type SyncServerLimits,
   type SyncServerOptions,
+  type SyncSession,
 } from "./core/server/sync-server";
 export type { Transport } from "./core/server/transport";

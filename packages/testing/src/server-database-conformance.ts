@@ -70,6 +70,9 @@ export const runServerDatabaseConformance = (
       { userId = "user-1", excludeNodeId = "node-z", limit = 100 } = {},
     ): Promise<PullResult> => live().pull(userId, { cursor, excludeNodeId, limit });
 
+    const claim = (deviceId: string, { userId = "user-1", nodeId = "node-a" } = {}) =>
+      live().claimNode(userId, nodeId, deviceId);
+
     /** Follows the cursor until `hasMore` is false, checking the paging invariants on every page. */
     const pullAll = async (
       startCursor: string | null = null,
@@ -419,6 +422,57 @@ export const runServerDatabaseConformance = (
 
       it("deleteUser on an unknown user does nothing", async () => {
         await expect(live().deleteUser("nobody")).resolves.toBeUndefined();
+      });
+    });
+
+    describe("claimNode", () => {
+      it("gives a node to the first device that claims it", async () => {
+        const first = await claim("device-a");
+        const again = await claim("device-a");
+        const other = await claim("device-b");
+
+        expect([first, again, other]).toEqual([true, true, false]);
+      });
+
+      it("keeps each node's owner separate", async () => {
+        await claim("device-a");
+
+        const otherNode = await claim("device-b", { nodeId: "node-b" });
+
+        expect(otherNode).toBe(true);
+      });
+
+      it("keeps each user's claims separate", async () => {
+        await claim("device-a");
+
+        const otherUser = await claim("device-b", { userId: "user-2" });
+
+        expect(otherUser).toBe(true);
+      });
+
+      it("deleteUser drops only that user's claims", async () => {
+        await claim("device-a");
+        await claim("device-a", { userId: "user-2" });
+
+        await live().deleteUser("user-1");
+        const droppedUser = await claim("device-b");
+        const otherUser = await claim("device-b", { userId: "user-2" });
+
+        expect(droppedUser).toBe(true);
+        expect(otherUser).toBe(false);
+      });
+
+      it.each(["__proto__", "constructor"])("treats %s like any other node id", async (nodeId) => {
+        const first = await claim("device-a", { nodeId });
+        const other = await claim("device-b", { nodeId });
+
+        expect([first, other]).toEqual([true, false]);
+      });
+
+      it("gives a node to exactly one of two devices claiming it concurrently", async () => {
+        const results = await Promise.all([claim("device-a"), claim("device-b")]);
+
+        expect(results.filter(Boolean)).toHaveLength(1);
       });
     });
   });

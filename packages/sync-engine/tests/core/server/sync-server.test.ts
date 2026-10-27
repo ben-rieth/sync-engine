@@ -9,6 +9,7 @@ import {
   type SyncServer,
   type SyncServerHooks,
   type SyncServerOptions,
+  type SyncSession,
 } from "#core/server/sync-server";
 import { delta, serverDeltas } from "../../helpers";
 
@@ -23,18 +24,20 @@ const BASE = `${ORIGIN}/api/sync`;
 const START = 1_700_000_000_000;
 const HEADERS: Record<string, string> = { [PROTOCOL_HEADER]: "1" };
 
+const session = (deviceId = "device-a", userId = "user-1"): SyncSession => ({ userId, deviceId });
+
 const setup = (options: Partial<SyncServerOptions> = {}) => {
   const database = serverMemoryDatabase();
-  const getUserId = vi.fn<SyncServerOptions["getUserId"]>(() => "user-1");
+  const getSession = vi.fn<SyncServerOptions["getSession"]>(() => session());
   const onError = vi.fn<NonNullable<SyncServerHooks["onError"]>>();
   const sync = createSyncServer({
     database,
-    getUserId,
+    getSession,
     hooks: { onError },
     now: () => START,
     ...options,
   });
-  return { sync, database, getUserId, onError };
+  return { sync, database, getSession, onError };
 };
 
 const pushRequest = (
@@ -115,20 +118,21 @@ describe("createSyncServer", () => {
       { name: "missing", headers: {} },
       { name: "a different version", headers: { [PROTOCOL_HEADER]: "2" } },
     ])(
-      "answers 409 when the protocol header is $name, before asking for the user",
+      "answers 409 when the protocol header is $name, before asking for the session",
       async ({ headers }) => {
-        const { sync, getUserId } = setup();
+        const { sync, getSession } = setup();
 
         const response = await send(sync, pushRequest([delta(1)], { headers }));
 
         expect(response).toMatchObject({ status: 409, body: { code: "protocol" } });
-        expect(getUserId).not.toHaveBeenCalled();
+        expect(getSession).not.toHaveBeenCalled();
       },
     );
 
     it("answers 401 without reading the body or touching the database", async () => {
-      const { sync, database } = setup({ getUserId: () => null });
+      const { sync, database } = setup({ getSession: () => null });
       const push = vi.spyOn(database, "push");
+      const claimNode = vi.spyOn(database, "claimNode");
       const { request, read } = streamedPush([]);
 
       const response = await send(sync, request);
@@ -136,17 +140,35 @@ describe("createSyncServer", () => {
       expect(response).toMatchObject({ status: 401, body: { code: "unauthorized" } });
       expect(read).not.toHaveBeenCalled();
       expect(push).not.toHaveBeenCalled();
+      expect(claimNode).not.toHaveBeenCalled();
     });
 
-    it("passes the request to getUserId and stores under the returned user", async () => {
-      const { sync, database, getUserId } = setup();
-      getUserId.mockReturnValue("user-2");
+    it.each<{ name: string; result: unknown }>([
+      { name: "undefined", result: undefined },
+      { name: "a string", result: "user-1" },
+      { name: "an empty userId", result: { userId: "", deviceId: "device-a" } },
+      { name: "no deviceId", result: { userId: "user-1" } },
+      { name: "an empty deviceId", result: { userId: "user-1", deviceId: "" } },
+      { name: "a numeric deviceId", result: { userId: "user-1", deviceId: 7 } },
+    ])("answers 401 when getSession returns $name", async ({ result }) => {
+      const { sync, getSession } = setup();
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a JavaScript host can return anything
+      getSession.mockReturnValue(result as SyncSession);
+
+      const response = await send(sync, pullRequest());
+
+      expect(response).toMatchObject({ status: 401, body: { code: "unauthorized" } });
+    });
+
+    it("passes the request to getSession and stores under the returned user", async () => {
+      const { sync, database, getSession } = setup();
+      getSession.mockReturnValue(session("device-a", "user-2"));
       const request = pushRequest([delta(1)]);
 
       await send(sync, request);
       const stored = await serverDeltas(database, "user-2");
 
-      expect(getUserId).toHaveBeenCalledWith(request);
+      expect(getSession).toHaveBeenCalledWith(request);
       expect(stored).toEqual([delta(1)]);
     });
   });
@@ -324,6 +346,86 @@ describe("createSyncServer", () => {
     });
   });
 
+  describe("node claims", () => {
+    it("answers 403 node-claimed and stores nothing when another device pushes as a node", async () => {
+      const { sync, database, getSession } = setup();
+      await send(sync, pushRequest([delta(1)]));
+
+      getSession.mockReturnValue(session("device-b"));
+      const response = await send(sync, pushRequest([delta(2)]));
+      const stored = await serverDeltas(database);
+
+      expect(response).toMatchObject({ status: 403, body: { code: "node-claimed" } });
+      expect(stored).toEqual([delta(1)]);
+    });
+
+    it("lets the owning device keep pushing", async () => {
+      const { sync } = setup();
+      await send(sync, pushRequest([delta(1)]));
+
+      const response = await send(sync, pushRequest([delta(2)]));
+
+      expect(response.status).toBe(204);
+    });
+
+    it("lets two devices with their own node ids both sync", async () => {
+      const { sync, getSession } = setup();
+
+      const pushA = await send(sync, pushRequest([delta(1, "node-a")]));
+      getSession.mockReturnValue(session("device-b"));
+      const pushB = await send(sync, pushRequest([delta(2, "node-b")], { nodeId: "node-b" }));
+      const pullB = await send(sync, pullRequest("nodeId=node-b"));
+
+      expect([pushA.status, pushB.status]).toEqual([204, 204]);
+      expect(pullB.body).toMatchObject({ deltas: [delta(1, "node-a")] });
+    });
+
+    it.each([
+      { name: "is too large", limits: { maxPushDeltas: 1 }, deltas: [delta(1), delta(2)] },
+      { name: "has a mismatched node", limits: {}, deltas: [delta(1, "node-b")] },
+      { name: "is too far ahead", limits: { maxDriftMs: 100 }, deltas: [delta(START + 101)] },
+    ])("claims nothing for a push that $name", async ({ limits, deltas }) => {
+      const { sync, getSession } = setup({ limits });
+
+      const refused = await send(sync, pushRequest(deltas));
+      getSession.mockReturnValue(session("device-b"));
+      const other = await send(sync, pushRequest([delta(3)]));
+
+      expect(refused.status).not.toBe(204);
+      expect(other.status).toBe(204);
+    });
+
+    it("claims nothing for an empty push", async () => {
+      const { sync, getSession } = setup();
+
+      await send(sync, pushRequest([]));
+      getSession.mockReturnValue(session("device-b"));
+      const other = await send(sync, pushRequest([delta(1)]));
+
+      expect(other.status).toBe(204);
+    });
+
+    it("keeps claims separate per user", async () => {
+      const { sync, getSession } = setup();
+      await send(sync, pushRequest([delta(1)]));
+
+      getSession.mockReturnValue(session("device-b", "user-2"));
+      const response = await send(sync, pushRequest([delta(2)]));
+
+      expect(response.status).toBe(204);
+    });
+
+    it("doesn't check node ids on pull", async () => {
+      const { sync, getSession } = setup();
+      await send(sync, pushRequest([delta(1)]));
+
+      getSession.mockReturnValue(session("device-b"));
+      const response = await send(sync, pullRequest("nodeId=node-a"));
+
+      expect(response).toMatchObject({ status: 200, body: { deltas: [] } });
+    });
+  });
+
   describe("pull", () => {
     it("answers 200 with the page", async () => {
       const { sync } = setup();
@@ -432,10 +534,10 @@ describe("createSyncServer", () => {
       expect(onError).toHaveBeenCalledWith(failure, request);
     });
 
-    it("answers 500 when getUserId throws", async () => {
+    it("answers 500 when getSession throws", async () => {
       const failure = new Error("session store down");
       const { sync, onError } = setup({
-        getUserId: () => {
+        getSession: () => {
           throw failure;
         },
       });

@@ -214,6 +214,21 @@ describe("HLCTimestamp", () => {
     });
   });
 
+  describe("withNodeId", () => {
+    it("keeps the time and replaces the node", () => {
+      const original = ts(123, 45, "a");
+
+      const moved = original.withNodeId("b");
+
+      expect(moved.toString()).toBe(ts(123, 45, "b").toString());
+      expect(original.nodeId).toBe("a");
+    });
+
+    it("rejects an invalid node id", () => {
+      expect(() => ts(1, 0, "a").withNodeId("not valid")).toThrow("Invalid HLC nodeId");
+    });
+  });
+
   describe("toBigInt", () => {
     const cases = [
       { name: "zero", t: ts(0, 0, "a"), expected: 0n },

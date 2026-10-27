@@ -135,6 +135,15 @@ export class HybridLogicalClock {
     return new HLCTimestamp(this.#physical, this.#logical, this.nodeId);
   }
 
+  /** A clock for another node that continues from this one's state and options. */
+  withNodeId(nodeId: string): HybridLogicalClock {
+    return new HybridLogicalClock(nodeId, {
+      last: this.last(),
+      now: this.#now,
+      maxDriftMs: this.#maxDriftMs,
+    });
+  }
+
   toString(): string {
     return this.last().toString();
   }

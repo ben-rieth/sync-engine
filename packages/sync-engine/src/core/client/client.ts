@@ -2,6 +2,7 @@ import { parseDelta, type Delta } from "../delta";
 import {
   ConfigError,
   CorruptStorageError,
+  NodeClaimedError,
   RowError,
   TransportError,
   type UnexpectedError,
@@ -30,7 +31,7 @@ export type SyncClientOptions = {
    * Must never return a deleted row's id: generated ids are not checked against deletes.
    */
   generateId?: () => string;
-  /** Generates this device's node id on first start. Defaults to `crypto.randomUUID()`. */
+  /** Generates this device's node ids; must be unguessable. Defaults to `crypto.randomUUID()`. */
   generateNodeId?: () => string;
   now?: () => number;
   /** How far ahead of local time a remote timestamp may be before pulling stops. Default 5 minutes. */
@@ -57,13 +58,15 @@ export type DeleteError = WriteError;
 export type SyncNowError =
   | TransportError
   | LocalClockAheadError
+  | NodeClaimedError
   | ClockDriftError
   | ServerProtocolError
   | WriteError;
 
 /** Methods return failures as `{ error }` and reject only with `ConfigError`. */
 export type SyncClient = {
-  nodeId: string;
+  /** Changes when the server says another device owns it; see `syncNow`. */
+  readonly nodeId: string;
   /**
    * Creates a row and records one delta per column. `id` and `undefined` values are ignored;
    * use `null` to store an empty value. Returns the row's id.
@@ -92,6 +95,10 @@ export type SyncClient = {
    *
    * Earlier pages and batches stay done; the failing one does not. Nothing is pushed if the pull
    * fails. Throws `ConfigError` without a transport.
+   *
+   * If the server says another device owns this node id (e.g. after signing in again), the client
+   * switches to a fresh node id, moves the outbox onto it and pushes again. A second refusal in
+   * the same sync is returned as `NodeClaimedError`.
    *
    * Only one sync runs at a time. A call made while one is running waits for it, then shares a
    * single follow-up sync with every other call made meanwhile, so each call resolves only after a
@@ -161,6 +168,14 @@ const parsePage = (response: PullResult): PullResult<Delta> => {
   return { ...envelope.value, deltas };
 };
 
+const readNodeId = async (tx: StorageTx): Promise<string | undefined> => {
+  const stored = await tx.meta.get("nodeId");
+  if (stored !== undefined && !isValidNodeId(stored)) {
+    throw new CorruptStorageError(`Stored nodeId is corrupt: ${stored}`);
+  }
+  return stored;
+};
+
 type ResolvedOptions = SyncClientOptions & {
   generateId: () => string;
   generateNodeId: () => string;
@@ -195,30 +210,44 @@ export const createSyncClient = async (
 const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
   const { storage, generateId, generateNodeId, pullLimit, pushBatchSize } = options;
 
+  const createNodeId = () => {
+    const generated = generateNodeId();
+    if (!isValidNodeId(generated)) {
+      throw new ConfigError(
+        `generateNodeId returned an invalid nodeId: ${JSON.stringify(generated)}`,
+      );
+    }
+    return generated;
+  };
+
   // readwrite so two tabs starting at once agree on a single node id
-  const nodeId = await storage.transaction("readwrite", async (tx) => {
-    let saved = await tx.meta.get("nodeId");
-    if (saved === undefined) {
-      const generated = generateNodeId();
-      if (!isValidNodeId(generated)) {
-        throw new ConfigError(
-          `generateNodeId returned an invalid nodeId: ${JSON.stringify(generated)}`,
-        );
-      }
-      saved = generated;
-      await tx.meta.set("nodeId", saved);
-    } else if (!isValidNodeId(saved)) {
-      throw new CorruptStorageError(`Stored nodeId is corrupt: ${saved}`);
+  const initialNodeId = await storage.transaction("readwrite", async (tx) => {
+    const stored = await readNodeId(tx);
+    if (stored !== undefined) {
+      return stored;
     }
 
-    return saved;
+    const created = createNodeId();
+    await tx.meta.set("nodeId", created);
+    return created;
   });
 
-  const clock = new HybridLogicalClock(nodeId, {
+  let clock = new HybridLogicalClock(initialNodeId, {
     now: options.now,
     maxDriftMs: options.maxDriftMs,
   });
   let lastSeenStoredClock: string | undefined;
+
+  // Storage is the source of truth: another tab, or a rolled-back rotation, may have changed it
+  const syncNodeId = async (tx: StorageTx) => {
+    const stored = await readNodeId(tx);
+    if (stored === undefined) {
+      throw new CorruptStorageError("Stored nodeId is missing");
+    }
+    if (stored !== clock.nodeId) {
+      clock = clock.withNodeId(stored);
+    }
+  };
 
   // Other tabs and workers on the same storage advance the stored clock too
   const mergeStoredClock = async (tx: StorageTx) => {
@@ -248,6 +277,7 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
    */
   const write = <T>(fn: (ctx: WriteContext) => Promise<T>): Promise<T> =>
     storage.transaction("readwrite", async (tx) => {
+      await syncNodeId(tx);
       await mergeStoredClock(tx);
 
       let clockChanged = false;
@@ -273,7 +303,11 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
   const fetchPage = async (transport: Transport, from: string | undefined): Promise<Fetched> => {
     let response: PullResult;
     try {
-      response = await transport.pull({ cursor: from ?? null, nodeId, limit: pullLimit });
+      response = await transport.pull({
+        cursor: from ?? null,
+        nodeId: clock.nodeId,
+        limit: pullLimit,
+      });
     } catch (error) {
       throw new TransportError(error);
     }
@@ -303,8 +337,36 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
       return { applied: true, cursor: page.cursor ?? from };
     });
 
+  /**
+   * Moves this device and its outbox onto a fresh node id, unless another tab already moved off
+   * `refused`. Outbox deltas keep their time, so last-writer-wins treats them as before.
+   */
+  const rotateNodeId = (refused: string) =>
+    storage.transaction("readwrite", async (tx) => {
+      const stored = await readNodeId(tx);
+      if (stored !== refused) {
+        return;
+      }
+
+      const next = createNodeId();
+      const outbox = await tx.outbox.list();
+      await tx.outbox.delete(outbox.map((delta) => delta.timestamp));
+      await tx.outbox.add(
+        // oxlint-disable-next-line no-map-spread -- adapters needn't return copies, so don't mutate
+        outbox.map((delta) => ({
+          ...delta,
+          timestamp: HLCTimestamp.parse(delta.timestamp).withNodeId(next).toString(),
+        })),
+      );
+      await tx.meta.set("nodeId", next);
+    });
+
   const pullAll = async (transport: Transport): Promise<void> => {
-    const start = await storage.transaction("read", (tx) => tx.meta.get("cursor"));
+    // Syncs the node id too, so pulls leave out what this device pushed under its current id
+    const start = await storage.transaction("read", async (tx) => {
+      await syncNodeId(tx);
+      return tx.meta.get("cursor");
+    });
     let pending = fetchPage(transport, start);
 
     for (;;) {
@@ -335,8 +397,13 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
 
   /** Pushes the oldest batch from the outbox. Returns whether there was anything to push. */
   const pushBatch = async (transport: Transport): Promise<boolean> => {
-    // Read the outbox fresh each time, so writes made during an earlier batch are sent too
-    const batch = await storage.transaction("read", (tx) => tx.outbox.list(pushBatchSize));
+    // Read the outbox fresh each time, so writes made during an earlier batch are sent too.
+    // Read the node id with it, so the batch and the id it's pushed under match.
+    const { batch, batchNodeId } = await storage.transaction("read", async (tx) => {
+      await syncNodeId(tx);
+      const deltas = await tx.outbox.list(pushBatchSize);
+      return { batch: deltas, batchNodeId: clock.nodeId };
+    });
     if (batch.length === 0) {
       return false;
     }
@@ -344,9 +411,10 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
     // If this succeeds but the move below never happens,
     // the batch stays in the outbox and is pushed again; the server ignores timestamps it has.
     try {
-      await transport.push({ nodeId, deltas: batch });
+      await transport.push({ nodeId: batchNodeId, deltas: batch });
     } catch (error) {
-      throw error instanceof LocalClockAheadError ? error : new TransportError(error);
+      const known = error instanceof LocalClockAheadError || error instanceof NodeClaimedError;
+      throw known ? error : new TransportError(error);
     }
 
     // Moving to history (not deleting) keeps these deltas counting for last-writer-wins
@@ -356,14 +424,27 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
     return true;
   };
 
+  const pushAll = async (transport: Transport): Promise<void> => {
+    let pushed = true;
+    while (pushed) {
+      // oxlint-disable-next-line no-await-in-loop -- each batch is the oldest left after the last one moved
+      pushed = await pushBatch(transport);
+    }
+  };
+
   const runSync = (transport: Transport): Promise<Result<void, SyncNowError>> =>
     toResult(async () => {
       await pullAll(transport);
 
-      let pushed = true;
-      while (pushed) {
-        // oxlint-disable-next-line no-await-in-loop -- each batch is the oldest left after the last one moved
-        pushed = await pushBatch(transport);
+      try {
+        await pushAll(transport);
+      } catch (error) {
+        if (!(error instanceof NodeClaimedError)) {
+          throw error;
+        }
+        // A fresh node id is never owned yet, so a second refusal means the host's deviceId is unstable
+        await rotateNodeId(error.nodeId);
+        await pushAll(transport);
       }
     });
 
@@ -380,7 +461,9 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
   };
 
   return {
-    nodeId,
+    get nodeId() {
+      return clock.nodeId;
+    },
     insert: (table, values, insertOptions) =>
       toResult(() =>
         write(async ({ tx, tick }) => {

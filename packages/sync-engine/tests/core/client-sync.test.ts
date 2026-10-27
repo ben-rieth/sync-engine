@@ -4,7 +4,7 @@ import { serverMemoryDatabase } from "#adapters/server-memory";
 import { memoryTransport } from "#adapters/transport-memory";
 import { type SyncClientOptions, type SyncNowError } from "#core/client/client";
 import type { Delta } from "#core/delta";
-import { ConfigError, TransportError } from "#core/errors";
+import { ConfigError, NodeClaimedError, TransportError } from "#core/errors";
 import { LocalClockAheadError } from "#core/hlc/clock";
 import { compareTimestamps, HLCTimestamp } from "#core/hlc/timestamp";
 import type { PullResult } from "#core/server/server";
@@ -115,6 +115,40 @@ const inHistory = (storage: StorageAdapter, deltas: Delta[]) =>
   read(storage, (tx) => tx.history.has(timestamps(deltas)));
 
 const outbox = (storage: StorageAdapter) => read(storage, (tx) => tx.outbox.list());
+
+const storedNodeId = (storage: StorageAdapter) => read(storage, (tx) => tx.meta.get("nodeId"));
+
+const nodeOf = (delta: Delta) => HLCTimestamp.parse(delta.timestamp).nodeId;
+
+const onNode = (delta: Delta, nodeId: string): Delta => ({
+  ...delta,
+  timestamp: HLCTimestamp.parse(delta.timestamp).withNodeId(nodeId).toString(),
+});
+
+// Hands out `ids` in order and fails once they run out
+const nodeIdSequence =
+  (...ids: string[]) =>
+  () => {
+    const next = ids.shift();
+    if (next === undefined) {
+      throw new Error("No more node ids");
+    }
+    return next;
+  };
+
+// Starts as node-a and moves to each of `rotations` in turn
+const setupRotating = (...rotations: string[]) =>
+  setup({ generateNodeId: nodeIdSequence("node-a", ...rotations) });
+
+// As the server does when another device owns the node id
+const refusePushesFrom = (spy: ReturnType<typeof spyTransport>, ...nodeIds: string[]) => {
+  spy.beforePush = async () => {
+    const nodeId = spy.pushes.at(-1)?.nodeId;
+    if (nodeId !== undefined && nodeIds.includes(nodeId)) {
+      throw new NodeClaimedError(nodeId);
+    }
+  };
+};
 
 // Tests run on Node, but the ES-only lib has no timer types
 declare const setTimeout: (callback: () => void, ms: number) => unknown;
@@ -898,6 +932,161 @@ describe("syncNow pushing", () => {
     expectTypeOf((error: SyncNowError) =>
       error.code === "clock-ahead" ? error.skewMs : null,
     ).returns.toEqualTypeOf<number | null>();
+  });
+});
+
+describe("syncNow when another device owns the node id", () => {
+  it("moves the outbox to a fresh node id, keeping each delta's time, and pushes it", async () => {
+    const { client, storage, server, spy } = await setupRotating("node-c");
+    await client.insert(TABLE, { title: "hello", done: false }, { id: "obj-1" });
+    const pending = await outbox(storage);
+    refusePushesFrom(spy, "node-a");
+
+    await client.syncNow();
+    const onServer = await serverDeltas(server);
+    const remaining = await outbox(storage);
+    const saved = await storedNodeId(storage);
+
+    expect(spy.pushes.map((push) => push.nodeId)).toEqual(["node-a", "node-c"]);
+    expect(onServer).toEqual(pending.map((delta) => onNode(delta, "node-c")));
+    expect(remaining).toEqual([]);
+    expect(saved).toBe("node-c");
+    expect(client.nodeId).toBe("node-c");
+  });
+
+  it("stamps later writes with the new node id, after the moved ones", async () => {
+    const { client, storage, spy } = await setupRotating("node-c");
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+    const before = await outbox(storage);
+    refusePushesFrom(spy, "node-a");
+    await client.syncNow();
+
+    await client.update(TABLE, "obj-1", { title: "changed" });
+    const after = await outbox(storage);
+    // The moved insert, then the update
+    const issued = timestamps([...before.map((delta) => onNode(delta, "node-c")), ...after]);
+
+    expect(after.map(nodeOf)).toEqual(["node-c"]);
+    expect(issued).toEqual(issued.toSorted(compareTimestamps));
+    expect(new Set(issued).size).toBe(2);
+  });
+
+  it("returns NodeClaimedError and keeps the outbox when the fresh node id is refused too", async () => {
+    const { client, storage, spy } = await setupRotating("node-c", "node-d");
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+    const pending = await outbox(storage);
+    refusePushesFrom(spy, "node-a", "node-c");
+
+    const error = await failed(client.raw.syncNow(), "node-claimed");
+    const remaining = await outbox(storage);
+
+    expect(error.nodeId).toBe("node-c");
+    expect(spy.pushes.map((push) => push.nodeId)).toEqual(["node-a", "node-c"]);
+    expect(remaining).toEqual(pending.map((delta) => onNode(delta, "node-c")));
+  });
+
+  it("throws and changes nothing when the fresh node id is invalid", async () => {
+    const { client, storage, spy } = await setupRotating("not valid");
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+    const pending = await outbox(storage);
+    refusePushesFrom(spy, "node-a");
+
+    const syncing = client.raw.syncNow();
+    await expect(syncing).rejects.toThrow(ConfigError);
+    const remaining = await outbox(storage);
+    const saved = await storedNodeId(storage);
+
+    expect(remaining).toEqual(pending);
+    expect(saved).toBe("node-a");
+    expect(client.nodeId).toBe("node-a");
+  });
+
+  it("merges the deltas it pushed under the old node id as no-ops on the next sync", async () => {
+    const { client, storage, server, spy } = await setup({
+      generateNodeId: nodeIdSequence("node-a", "node-c"),
+      pushBatchSize: 1,
+    });
+    await client.insert(TABLE, { title: "first" }, { id: "obj-1" });
+    await client.insert(TABLE, { title: "second" }, { id: "obj-2" });
+    // The first push goes through; the second is refused
+    spy.beforePush = async () => {
+      const oldPushes = spy.pushes.filter((push) => push.nodeId === "node-a");
+      if (spy.pushes.at(-1)?.nodeId === "node-a" && oldPushes.length > 1) {
+        throw new NodeClaimedError("node-a");
+      }
+    };
+    await client.syncNow();
+    const onServer = await serverDeltas(server);
+    const oldDeltas = onServer.filter((delta) => nodeOf(delta) === "node-a");
+    const firstAfterRotation = await row(storage, "obj-1");
+    const secondAfterRotation = await row(storage, "obj-2");
+    const recordedAfterRotation = await inHistory(storage, oldDeltas);
+    const cursorAfterRotation = await cursor(storage);
+
+    const { error } = await client.raw.syncNow();
+    const firstAfterResync = await row(storage, "obj-1");
+    const secondAfterResync = await row(storage, "obj-2");
+    const recordedAfterResync = await inHistory(storage, oldDeltas);
+    const cursorAfterResync = await cursor(storage);
+    const pending = await outbox(storage);
+
+    expect(oldDeltas).toHaveLength(1);
+    expect(error).toBeNull();
+    expect(spy.cursors.at(-1)).toBe(cursorAfterRotation);
+    expect(cursorAfterResync).not.toBe(cursorAfterRotation);
+    expect(firstAfterResync).toEqual(firstAfterRotation);
+    expect(secondAfterResync).toEqual(secondAfterRotation);
+    expect(recordedAfterResync).toEqual(recordedAfterRotation);
+    expect(pending).toEqual([]);
+  });
+
+  it("keeps the node id when a push fails for another reason", async () => {
+    const { client, spy } = await setupRotating("node-c");
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+    spy.beforePush = async () => {
+      throw new Error("offline");
+    };
+
+    await failed(client.raw.syncNow(), "transport");
+
+    expect(client.nodeId).toBe("node-a");
+  });
+
+  it("moves another client on the same storage onto the new node id", async () => {
+    const { client, storage, spy, options } = await setupRotating("node-c");
+    const other = await openClient(options);
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+    refusePushesFrom(spy, "node-a");
+    await client.syncNow();
+
+    await other.insert(TABLE, { title: "other" }, { id: "obj-2" });
+    const pending = await outbox(storage);
+
+    expect(pending.map(nodeOf)).toEqual(["node-c"]);
+    expect(other.nodeId).toBe("node-c");
+  });
+
+  it("rotates once when two clients on the same storage are refused", async () => {
+    const { client, storage, server, spy, options } = await setupRotating("node-c");
+    const otherSpy = spyTransport(memoryTransport(server, USER));
+    const other = await openClient({ ...options, transport: otherSpy.transport });
+    await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
+    refusePushesFrom(spy, "node-a");
+    // `client` rotates while `other`'s push as node-a is on its way to being refused
+    otherSpy.beforePush = async () => {
+      otherSpy.beforePush = undefined;
+      await client.syncNow();
+      throw new NodeClaimedError("node-a");
+    };
+
+    // A second rotation would run out of node ids and fail
+    await other.syncNow();
+    const saved = await storedNodeId(storage);
+    const onServer = await serverDeltas(server);
+
+    expect(saved).toBe("node-c");
+    expect(other.nodeId).toBe("node-c");
+    expect(onServer).toHaveLength(1);
   });
 });
 

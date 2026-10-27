@@ -21,6 +21,7 @@ const spyServer = () => {
       return { deltas: stored, cursor: "1", hasMore: false };
     },
     deleteUser: async () => {},
+    claimNode: async () => true,
   };
 
   return { server, pushes, pulls, stored };

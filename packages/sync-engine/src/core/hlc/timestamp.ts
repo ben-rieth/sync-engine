@@ -64,6 +64,11 @@ export class HLCTimestamp {
     return `${pad(this.physicalTime, 15)}.${pad(this.logicalTime, 4)}.${this.nodeId}`;
   }
 
+  /** The same moment on another node. */
+  withNodeId(nodeId: string): HLCTimestamp {
+    return new HLCTimestamp(this.physicalTime, this.logicalTime, nodeId);
+  }
+
   toBigInt(): bigint {
     return BigInt(this.physicalTime) * LOGICAL_FACTOR + BigInt(this.logicalTime);
   }

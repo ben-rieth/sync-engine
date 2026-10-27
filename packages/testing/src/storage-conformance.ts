@@ -341,6 +341,37 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         expect(deleted).toEqual(new Set([objectKey(obj("obj-2"))]));
       });
 
+      it("delete removes deltas from the outbox without adding them to history", async () => {
+        const deltas = [1, 2, 3].map((n) => setDelta({ timestamp: ts(n), value: n }));
+        await rw((tx) => tx.outbox.add(deltas));
+
+        await rw((tx) => tx.outbox.delete([ts(1), ts(3), ts(9)]));
+
+        const list = await ro((tx) => tx.outbox.list());
+        const count = await ro((tx) => tx.outbox.count());
+        const history = await ro((tx) => tx.history.has([ts(1), ts(2), ts(3)]));
+
+        expect(list).toEqual([deltas[1]]);
+        expect(count).toBe(1);
+        expect(history).toEqual(new Set());
+      });
+
+      it("deleted deltas no longer count for latest and deleted", async () => {
+        await rw((tx) =>
+          tx.outbox.add([
+            setDelta({ timestamp: ts(1) }),
+            deleteDelta({ timestamp: ts(2), objectId: "obj-2" }),
+          ]),
+        );
+        await rw((tx) => tx.outbox.delete([ts(1), ts(2)]));
+
+        const latest = await ro((tx) => tx.latest([cell()]));
+        const deleted = await ro((tx) => tx.deleted([obj("obj-2")]));
+
+        expect(latest).toEqual(new Map());
+        expect(deleted).toEqual(new Set());
+      });
+
       it("set and delete deltas round-trip through list unchanged", async () => {
         const deltas = [
           setDelta({
