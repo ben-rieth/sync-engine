@@ -27,8 +27,7 @@ const plan = ({
   incoming = [] as Delta[],
   latest = new Map<DeltaKey, string>(),
   deleted = new Set<ObjectKey>(),
-  knownTimestamps = new Set<string>(),
-} = {}) => planMerge({ incoming, latest, deleted, knownTimestamps });
+} = {}) => planMerge({ incoming, latest, deleted });
 
 describe("planMerge", () => {
   it("returns an empty plan for no incoming deltas", () => {
@@ -62,14 +61,14 @@ describe("planMerge", () => {
       expect(result.maxTimestamp).toBe(t(2));
     });
 
-    it("skips the write when the local cell is newer, but still records history", () => {
+    it("skips the write and history when the local cell is newer", () => {
       const incoming = delta(t(1), "title", "stale");
       const latest = new Map<DeltaKey, string>([[deltaKey(incoming), t(5)]]);
 
       const result = plan({ incoming: [incoming], latest });
 
       expect(result.writes).toEqual([]);
-      expect(result.historyAdds).toEqual([incoming]);
+      expect(result.historyAdds).toEqual([]);
     });
 
     it("skips the write when the local cell has the same timestamp", () => {
@@ -100,17 +99,17 @@ describe("planMerge", () => {
       expect(result.historyAdds).toEqual([patch, del]);
     });
 
-    it("keeps the delete when a patch follows the tombstone, and records the patch in history", () => {
+    it("keeps the delete when a patch follows the tombstone, and leaves the patch out of history", () => {
       const del = tombstone(t(1));
       const patch = delta(t(2), "title", "too late");
 
       const result = plan({ incoming: [patch, del] });
 
       expect(result.writes).toEqual([{ kind: "delete", table: TABLE, objectId: OBJECT }]);
-      expect(result.historyAdds).toEqual([del, patch]);
+      expect(result.historyAdds).toEqual([del]);
     });
 
-    it("ignores patches for objects already deleted locally, but records history", () => {
+    it("ignores patches for objects already deleted locally", () => {
       const patch = delta(t(1), "title", "ghost");
 
       const result = plan({
@@ -119,10 +118,10 @@ describe("planMerge", () => {
       });
 
       expect(result.writes).toEqual([]);
-      expect(result.historyAdds).toEqual([patch]);
+      expect(result.historyAdds).toEqual([]);
     });
 
-    it("ignores tombstones for objects already deleted locally, but records history", () => {
+    it("ignores tombstones for objects already deleted locally", () => {
       const del = tombstone(t(1));
 
       const result = plan({
@@ -131,7 +130,7 @@ describe("planMerge", () => {
       });
 
       expect(result.writes).toEqual([]);
-      expect(result.historyAdds).toEqual([del]);
+      expect(result.historyAdds).toEqual([]);
     });
   });
 
@@ -174,29 +173,36 @@ describe("planMerge", () => {
     });
   });
 
-  describe("known timestamps", () => {
-    it("produces no write and no history add for a known timestamp", () => {
+  describe("re-delivered deltas", () => {
+    it("produce no write and no history add when already the newest", () => {
       const known = delta(t(1), "title", "already have it");
+      const latest = new Map<DeltaKey, string>([[deltaKey(known), t(1)]]);
 
-      const result = plan({ incoming: [known], knownTimestamps: new Set([t(1)]) });
+      const result = plan({ incoming: [known], latest });
 
       expect(result.writes).toEqual([]);
       expect(result.historyAdds).toEqual([]);
     });
 
-    it("deduplicates repeated timestamps within one batch", () => {
+    it("are recorded once when repeated within one batch", () => {
       const a = delta(t(1), "title", "once");
+      const del = tombstone(t(2), { objectId: "obj-2" });
 
-      const result = plan({ incoming: [a, { ...a }] });
+      const result = plan({ incoming: [a, { ...a }, del, { ...del }] });
 
-      expect(result.historyAdds).toEqual([a]);
-      expect(result.writes).toHaveLength(1);
+      expect(result.historyAdds).toEqual([a, del]);
+      expect(result.writes).toHaveLength(2);
     });
 
-    it("still reports the newest incoming timestamp when every delta is known", () => {
+    it("still report the newest incoming timestamp when none takes effect", () => {
+      const a = delta(t(1), "title", "a");
+      const b = delta(t(2), "done", true);
       const result = plan({
-        incoming: [delta(t(1), "title", "a"), delta(t(2), "done", true)],
-        knownTimestamps: new Set([t(1), t(2)]),
+        incoming: [a, b],
+        latest: new Map<DeltaKey, string>([
+          [deltaKey(a), t(1)],
+          [deltaKey(b), t(2)],
+        ]),
       });
 
       expect(result.writes).toEqual([]);
@@ -250,21 +256,18 @@ describe("planMerge", () => {
       [deltaKey(delta(t(0), "title", null, { objectId: "obj-3" })), t(0)],
     ]);
     const deleted = new Set<ObjectKey>([objectKey({ table: TABLE, objectId: "obj-4" })]);
-    const knownTimestamps = new Set([t(9)]);
 
     const snapshot = {
       incoming: incoming.map((d) => ({ ...d })),
       latest: new Map(latest),
       deleted: new Set(deleted),
-      knownTimestamps: new Set(knownTimestamps),
     };
 
-    plan({ incoming, latest, deleted, knownTimestamps });
+    plan({ incoming, latest, deleted });
 
     expect(incoming).toEqual(snapshot.incoming);
     expect(latest).toEqual(snapshot.latest);
     expect(deleted).toEqual(snapshot.deleted);
-    expect(knownTimestamps).toEqual(snapshot.knownTimestamps);
   });
 
   it("stores a __proto__ column as an own key on the patch", () => {
@@ -301,7 +304,7 @@ describe("planMerge", () => {
 describe("planMerge convergence", () => {
   type Row = { table: string; objectId: string; values: Record<string, unknown> };
 
-  // `latest` and known timestamps are derived from history rather than stored
+  // `latest` is derived from history rather than stored
   const createReplica = () => ({
     rows: new Map<ObjectKey, Row>(),
     deleted: new Set<ObjectKey>(),
@@ -309,10 +312,10 @@ describe("planMerge convergence", () => {
   });
   type Replica = ReturnType<typeof createReplica>;
 
-  const receive = (replica: Replica, incoming: Delta[]) => {
+  const latestOf = (replica: Replica) => {
     const latest = new Map<DeltaKey, string>();
     for (const d of replica.history) {
-      if (d.kind !== "set") {
+      if (d.kind !== "set" || replica.deleted.has(objectKey(d))) {
         continue;
       }
       const key = deltaKey(d);
@@ -321,12 +324,16 @@ describe("planMerge convergence", () => {
         latest.set(key, d.timestamp);
       }
     }
+    return latest;
+  };
+
+  const receive = (replica: Replica, incoming: Delta[]) => {
+    const latest = latestOf(replica);
 
     const result = planMerge({
       incoming,
       latest,
       deleted: replica.deleted,
-      knownTimestamps: new Set(replica.history.map((d) => d.timestamp)),
     });
 
     for (const write of result.writes) {
@@ -384,6 +391,12 @@ describe("planMerge convergence", () => {
     deleted: [objectKey({ table: TABLE, objectId: "obj-2" })],
   };
 
+  const expectedLatest = new Map<DeltaKey, string>([
+    [deltaKey(delta(t(3), "title", "b")), t(3)],
+    [deltaKey(delta(t(7), "done", true)), t(7)],
+    [deltaKey(delta(t(8), "title", "x", { objectId: "obj-3" })), t(8)],
+  ]);
+
   for (const [orderName, order] of Object.entries(orders)) {
     for (const [batchingName, batch] of Object.entries(batchings)) {
       it(`reaches the same state for ${orderName} order, ${batchingName}`, () => {
@@ -391,9 +404,12 @@ describe("planMerge convergence", () => {
         for (const incoming of batch(order)) {
           receive(replica, incoming);
         }
+        const recorded = replica.history.map((d) => d.timestamp);
+        const latest = latestOf(replica);
 
         expect(snapshot(replica)).toEqual(expected);
-        expect(replica.history).toHaveLength(deltas.length);
+        expect(latest).toEqual(expectedLatest);
+        expect(new Set(recorded).size).toBe(recorded.length);
       });
     }
   }

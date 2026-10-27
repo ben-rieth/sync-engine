@@ -7,14 +7,17 @@ import { cloneJson } from "#utils/json";
 type MemoryState = {
   rows: Map<string, Map<string, Record<string, unknown>>>;
   outbox: Map<string, Delta>;
-  history: Map<string, Delta>;
+  // History: newest set timestamp per object and column, and deleted objects
+  cells: Map<ObjectKey, Map<string, string>>;
+  tombstones: Set<ObjectKey>;
   meta: Map<MetaKey, string>;
 };
 
 const snapshotState = (s: MemoryState): MemoryState => ({
   rows: new Map([...s.rows].map(([table, rows]) => [table, new Map(rows)])),
   outbox: new Map(s.outbox),
-  history: new Map(s.history),
+  cells: new Map([...s.cells].map(([object, columns]) => [object, new Map(columns)])),
+  tombstones: new Set(s.tombstones),
   meta: new Map(s.meta),
 });
 
@@ -26,6 +29,30 @@ const tableRows = (state: MemoryState, table: string) => {
   }
 
   return rows;
+};
+
+const recordHistory = (state: MemoryState, delta: Delta) => {
+  const object = objectKey(delta);
+  if (state.tombstones.has(object)) {
+    return;
+  }
+
+  if (delta.kind === "delete") {
+    state.tombstones.add(object);
+    state.cells.delete(object);
+    return;
+  }
+
+  let columns = state.cells.get(object);
+  if (!columns) {
+    columns = new Map();
+    state.cells.set(object, columns);
+  }
+
+  const current = columns.get(delta.column);
+  if (current === undefined || delta.timestamp > current) {
+    columns.set(delta.column, delta.timestamp);
+  }
 };
 
 const createTx = (getState: () => MemoryState, mode: TransactionMode): StorageTx => {
@@ -69,12 +96,12 @@ const createTx = (getState: () => MemoryState, mode: TransactionMode): StorageTx
       },
       count: async () => getState().outbox.size,
       moveToHistory: async (timestamps) => {
-        const { outbox, history } = writable();
+        const state = writable();
         for (const timestamp of timestamps) {
-          const delta = outbox.get(timestamp);
+          const delta = state.outbox.get(timestamp);
           if (delta) {
-            history.set(timestamp, delta);
-            outbox.delete(timestamp);
+            recordHistory(state, delta);
+            state.outbox.delete(timestamp);
           }
         }
       },
@@ -87,39 +114,34 @@ const createTx = (getState: () => MemoryState, mode: TransactionMode): StorageTx
     },
     history: {
       add: async (deltas) => {
-        const { history } = writable();
+        const state = writable();
         for (const delta of deltas) {
-          if (!history.has(delta.timestamp)) {
-            history.set(delta.timestamp, cloneJson(delta));
-          }
+          recordHistory(state, delta);
         }
-      },
-      has: async (timestamps) => {
-        const { history } = getState();
-        return new Set(timestamps.filter((timestamp) => history.has(timestamp)));
       },
     },
     latest: async (cells) => {
       const state = getState();
-
-      const wanted = new Set(cells.map((cell) => deltaKey(cell)));
       const result = new Map<DeltaKey, string>();
 
-      for (const source of [state.history, state.outbox]) {
-        for (const delta of source.values()) {
-          if (delta.kind === "delete") {
-            continue;
-          }
+      const wanted = new Set(cells.map((cell) => deltaKey(cell)));
 
-          const key = deltaKey(delta);
-          if (!wanted.has(key)) {
-            continue;
-          }
+      for (const cell of cells) {
+        const timestamp = state.cells.get(objectKey(cell))?.get(cell.column);
+        if (timestamp !== undefined) {
+          result.set(deltaKey(cell), timestamp);
+        }
+      }
 
-          const current = result.get(key);
-          if (current === undefined || delta.timestamp > current) {
-            result.set(key, delta.timestamp);
-          }
+      for (const delta of state.outbox.values()) {
+        if (delta.kind === "delete") {
+          continue;
+        }
+
+        const key = deltaKey(delta);
+        const current = result.get(key);
+        if (wanted.has(key) && (current === undefined || delta.timestamp > current)) {
+          result.set(key, delta.timestamp);
         }
       }
 
@@ -129,18 +151,16 @@ const createTx = (getState: () => MemoryState, mode: TransactionMode): StorageTx
       const state = getState();
 
       const wanted = new Set(objects.map((object) => objectKey(object)));
-      const result = new Set<ObjectKey>();
+      const result = new Set([...wanted].filter((key) => state.tombstones.has(key)));
 
-      for (const source of [state.history, state.outbox]) {
-        for (const delta of source.values()) {
-          if (delta.kind !== "delete") {
-            continue;
-          }
+      for (const delta of state.outbox.values()) {
+        if (delta.kind !== "delete") {
+          continue;
+        }
 
-          const key = objectKey(delta);
-          if (wanted.has(key)) {
-            result.add(key);
-          }
+        const key = objectKey(delta);
+        if (wanted.has(key)) {
+          result.add(key);
         }
       }
 
@@ -159,7 +179,8 @@ export const clientMemoryStorage = (): StorageAdapter & { state: MemoryState } =
   let state: MemoryState = {
     rows: new Map(),
     outbox: new Map(),
-    history: new Map(),
+    cells: new Map(),
+    tombstones: new Set(),
     meta: new Map(),
   };
   let queue: Promise<unknown> = Promise.resolve();

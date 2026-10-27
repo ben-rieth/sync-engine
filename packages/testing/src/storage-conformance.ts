@@ -297,7 +297,7 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         expect(after).toBe(3);
       });
 
-      it("moveToHistory removes deltas from the outbox and adds them to history", async () => {
+      it("moveToHistory removes deltas from the outbox", async () => {
         const deltas = [1, 2, 3].map((n) => setDelta({ timestamp: ts(n), value: n }));
         await rw((tx) => tx.outbox.add(deltas));
 
@@ -305,11 +305,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
         const list = await ro((tx) => tx.outbox.list());
         const count = await ro((tx) => tx.outbox.count());
-        const history = await ro((tx) => tx.history.has([ts(1), ts(2), ts(3)]));
 
         expect(list).toEqual([deltas[1]]);
         expect(count).toBe(1);
-        expect(history).toEqual(new Set([ts(1), ts(3)]));
       });
 
       it("moveToHistory ignores timestamps not in the outbox", async () => {
@@ -319,10 +317,8 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         await rw((tx) => tx.outbox.moveToHistory([ts(9)]));
 
         const list = await ro((tx) => tx.outbox.list());
-        const history = await ro((tx) => tx.history.has([ts(1), ts(9)]));
 
         expect(list).toEqual([delta]);
-        expect(history).toEqual(new Set());
       });
 
       it("moved deltas still count for latest and deleted", async () => {
@@ -341,7 +337,7 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         expect(deleted).toEqual(new Set([objectKey(obj("obj-2"))]));
       });
 
-      it("delete removes deltas from the outbox without adding them to history", async () => {
+      it("delete removes deltas from the outbox", async () => {
         const deltas = [1, 2, 3].map((n) => setDelta({ timestamp: ts(n), value: n }));
         await rw((tx) => tx.outbox.add(deltas));
 
@@ -349,11 +345,9 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
         const list = await ro((tx) => tx.outbox.list());
         const count = await ro((tx) => tx.outbox.count());
-        const history = await ro((tx) => tx.history.has([ts(1), ts(2), ts(3)]));
 
         expect(list).toEqual([deltas[1]]);
         expect(count).toBe(1);
-        expect(history).toEqual(new Set());
       });
 
       it("deleted deltas no longer count for latest and deleted", async () => {
@@ -394,59 +388,113 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
     });
 
     describe("history", () => {
-      it("has returns exactly the stored subset", async () => {
+      it("add keeps the newest set per cell, whatever the order", async () => {
         await rw((tx) =>
-          tx.history.add([setDelta({ timestamp: ts(1) }), deleteDelta({ timestamp: ts(2) })]),
+          tx.history.add([setDelta({ timestamp: ts(3) }), setDelta({ timestamp: ts(2) })]),
         );
-
-        const stored = await ro((tx) => tx.history.has([ts(1), ts(2), ts(3)]));
-        const unknown = await ro((tx) => tx.history.has([ts(3)]));
-        const empty = await ro((tx) => tx.history.has([]));
-
-        expect(stored).toEqual(new Set([ts(1), ts(2)]));
-        expect(unknown).toEqual(new Set());
-        expect(empty).toEqual(new Set());
-      });
-
-      it("has does not see outbox deltas", async () => {
-        await rw((tx) => tx.outbox.add([setDelta({ timestamp: ts(1) })]));
-
-        const history = await ro((tx) => tx.history.has([ts(1)]));
-
-        expect(history).toEqual(new Set());
-      });
-
-      it("add with an already-stored timestamp skips it without error or overwrite", async () => {
-        const otherCell = cell({ objectId: "obj-2", column: "body" });
         await rw((tx) => tx.history.add([setDelta({ timestamp: ts(1) })]));
 
-        await expect(
-          rw((tx) =>
-            tx.history.add([
-              setDelta({ timestamp: ts(1), objectId: "obj-2", column: "body", value: "new" }),
-              deleteDelta({ timestamp: ts(1), objectId: "obj-3" }),
-            ]),
-          ),
-        ).resolves.toBeUndefined();
+        const latest = await ro((tx) => tx.latest([cell()]));
 
-        const latest = await ro((tx) => tx.latest([cell(), otherCell]));
-        const deleted = await ro((tx) => tx.deleted([obj("obj-3")]));
-
-        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(1)]]));
-        expect(deleted).toEqual(new Set());
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(3)]]));
       });
 
-      it("add skips a timestamp that was moved from the outbox", async () => {
-        await rw((tx) => tx.outbox.add([setDelta({ timestamp: ts(1) })]));
-        await rw((tx) => tx.outbox.moveToHistory([ts(1)]));
-
-        await rw((tx) => tx.history.add([deleteDelta({ timestamp: ts(1), objectId: "obj-2" })]));
+      it("add is idempotent", async () => {
+        const deltas = [
+          setDelta({ timestamp: ts(1) }),
+          deleteDelta({ timestamp: ts(2), objectId: "obj-2" }),
+        ];
+        await rw((tx) => tx.history.add(deltas));
+        await rw((tx) => tx.history.add(deltas));
 
         const latest = await ro((tx) => tx.latest([cell()]));
         const deleted = await ro((tx) => tx.deleted([obj("obj-2")]));
 
         expect(latest).toEqual(new Map([[deltaKey(cell()), ts(1)]]));
-        expect(deleted).toEqual(new Set());
+        expect(deleted).toEqual(new Set([objectKey(obj("obj-2"))]));
+      });
+
+      it.each([
+        ["before", [setDelta({ timestamp: ts(1) })], [deleteDelta({ timestamp: ts(2) })]],
+        ["after", [deleteDelta({ timestamp: ts(2) })], [setDelta({ timestamp: ts(3) })]],
+        [
+          "in the same batch",
+          [setDelta({ timestamp: ts(3) }), deleteDelta({ timestamp: ts(2) })],
+          [],
+        ],
+      ])("a delete drops the object's sets added %s it", async (_order, first, second) => {
+        await rw((tx) => tx.history.add(first));
+        await rw((tx) => tx.history.add(second));
+
+        const latest = await ro((tx) => tx.latest([cell()]));
+        const deleted = await ro((tx) => tx.deleted([obj("obj-1")]));
+
+        expect(latest).toEqual(new Map());
+        expect(deleted).toEqual(new Set([objectKey(obj("obj-1"))]));
+      });
+
+      it("a delete keeps other objects' sets, including the same id in another table", async () => {
+        const others = [cell({ objectId: "obj-2" }), cell({ table: otherTable })];
+        await rw((tx) =>
+          tx.history.add([
+            setDelta({ ...others[0], timestamp: ts(1) }),
+            setDelta({ ...others[1], timestamp: ts(2) }),
+            deleteDelta({ timestamp: ts(3) }),
+          ]),
+        );
+
+        const latest = await ro((tx) => tx.latest(others));
+
+        expect(latest).toEqual(new Map(others.map((other, i) => [deltaKey(other), ts(i + 1)])));
+      });
+
+      it("a delete does not hide the object's outbox sets", async () => {
+        await rw(async (tx) => {
+          await tx.outbox.add([setDelta({ timestamp: ts(3) })]);
+          await tx.history.add([deleteDelta({ timestamp: ts(2) })]);
+        });
+
+        const latest = await ro((tx) => tx.latest([cell()]));
+
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(3)]]));
+      });
+
+      it("moveToHistory keeps a newer history set", async () => {
+        await rw(async (tx) => {
+          await tx.history.add([setDelta({ timestamp: ts(5) })]);
+          await tx.outbox.add([setDelta({ timestamp: ts(3) })]);
+        });
+        await rw((tx) => tx.outbox.moveToHistory([ts(3)]));
+
+        const latest = await ro((tx) => tx.latest([cell()]));
+
+        expect(latest).toEqual(new Map([[deltaKey(cell()), ts(5)]]));
+      });
+
+      it("moveToHistory of a delete drops the object's history sets", async () => {
+        await rw(async (tx) => {
+          await tx.history.add([setDelta({ timestamp: ts(1) })]);
+          await tx.outbox.add([deleteDelta({ timestamp: ts(2) })]);
+        });
+        await rw((tx) => tx.outbox.moveToHistory([ts(2)]));
+
+        const latest = await ro((tx) => tx.latest([cell()]));
+        const deleted = await ro((tx) => tx.deleted([obj("obj-1")]));
+
+        expect(latest).toEqual(new Map());
+        expect(deleted).toEqual(new Set([objectKey(obj("obj-1"))]));
+      });
+
+      it("moveToHistory drops a set for an object already deleted in history", async () => {
+        await rw(async (tx) => {
+          await tx.history.add([deleteDelta({ timestamp: ts(2) })]);
+          await tx.outbox.add([setDelta({ timestamp: ts(3) })]);
+        });
+        await rw((tx) => tx.outbox.moveToHistory([ts(3)]));
+
+        const latest = await ro((tx) => tx.latest([cell()]));
+
+        expect(latest).toEqual(new Map());
       });
     });
 
@@ -588,17 +636,19 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
       });
 
       it("ignores delete deltas", async () => {
-        const deletedOnly = cell({ objectId: "obj-2" });
+        const deletedOnly = [cell({ objectId: "obj-2" }), cell({ objectId: "obj-3" })];
         await rw(async (tx) => {
           await tx.history.add([
             setDelta({ timestamp: ts(1) }),
-            deleteDelta({ timestamp: ts(5) }),
             deleteDelta({ timestamp: ts(6), objectId: "obj-2" }),
           ]);
-          await tx.outbox.add([deleteDelta({ timestamp: ts(9) })]);
+          await tx.outbox.add([
+            deleteDelta({ timestamp: ts(7), objectId: "obj-3" }),
+            deleteDelta({ timestamp: ts(9) }),
+          ]);
         });
 
-        const latest = await ro((tx) => tx.latest([cell(), deletedOnly]));
+        const latest = await ro((tx) => tx.latest([cell(), ...deletedOnly]));
 
         expect(latest).toEqual(new Map([[deltaKey(cell()), ts(1)]]));
       });
@@ -748,12 +798,11 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           const row = await tx.rows.get(table, "obj-1");
           const list = await tx.outbox.list();
           const count = await tx.outbox.count();
-          const has = await tx.history.has([ts(1), ts(3)]);
           const latest = await tx.latest([cell(), cell({ column: "body" })]);
           const deleted = await tx.deleted([obj("obj-2")]);
           const meta = await tx.meta.get("cursor");
 
-          return { row, list, count, has, latest, deleted, meta };
+          return { row, list, count, latest, deleted, meta };
         });
 
         expect(result).toEqual({
@@ -763,7 +812,6 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
             deleteDelta({ timestamp: ts(2), objectId: "obj-2" }),
           ],
           count: 2,
-          has: new Set([ts(3)]),
           latest: new Map([
             [deltaKey(cell()), ts(1)],
             [deltaKey(cell({ column: "body" })), ts(3)],
@@ -787,12 +835,19 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
 
           const row = await tx.rows.get(table, "obj-1");
           const count = await tx.outbox.count();
-          const has = await tx.history.has([ts(1), ts(3)]);
+          const latest = await tx.latest([cell(), cell({ column: "body" })]);
 
-          return { row, count, has };
+          return { row, count, latest };
         });
 
-        expect(result).toEqual({ row: undefined, count: 1, has: new Set([ts(3), ts(1)]) });
+        expect(result).toEqual({
+          row: undefined,
+          count: 1,
+          latest: new Map([
+            [deltaKey(cell()), ts(1)],
+            [deltaKey(cell({ column: "body" })), ts(3)],
+          ]),
+        });
       });
 
       it("persists writes across transactions and read mode can read them", async () => {
@@ -806,18 +861,16 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
         const result = await ro(async (tx) => {
           const row = await tx.rows.get(table, "obj-1");
           const list = await tx.outbox.list();
-          const has = await tx.history.has([ts(2)]);
           const latest = await tx.latest([cell()]);
           const deleted = await tx.deleted([obj("obj-2")]);
           const meta = await tx.meta.get("userId");
 
-          return { row, list, has, latest, deleted, meta };
+          return { row, list, latest, deleted, meta };
         });
 
         expect(result).toEqual({
           row: { id: "obj-1", title: "hello" },
           list: [setDelta({ timestamp: ts(1) })],
-          has: new Set([ts(2)]),
           latest: new Map([[deltaKey(cell()), ts(1)]]),
           deleted: new Set([objectKey(obj("obj-2"))]),
           meta: "u1",
@@ -860,13 +913,12 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           const created = await tx.rows.get(table, "new");
           const outbox = await tx.outbox.list();
           const count = await tx.outbox.count();
-          const history = await tx.history.has([ts(1), ts(2), ts(3), ts(4), ts(5), ts(6), ts(7)]);
           const latest = await tx.latest([cell(), cell({ column: "body" })]);
           const deleted = await tx.deleted([obj("obj-8"), obj("obj-9")]);
           const cursor = await tx.meta.get("cursor");
           const clock = await tx.meta.get("clock");
 
-          return { keep, doomed, created, outbox, count, history, latest, deleted, cursor, clock };
+          return { keep, doomed, created, outbox, count, latest, deleted, cursor, clock };
         });
 
         expect(state).toEqual({
@@ -875,7 +927,6 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
           created: undefined,
           outbox: [setDelta({ timestamp: ts(1) }), setDelta({ timestamp: ts(2) })],
           count: 2,
-          history: new Set([ts(3)]),
           latest: new Map([
             [deltaKey(cell()), ts(2)],
             [deltaKey(cell({ column: "body" })), ts(3)],
@@ -911,8 +962,8 @@ export const runStorageConformance = (name: string, options: StorageConformanceO
             const current = Number(cursor ?? "0");
             await tx.rows.get(table, "obj-1");
             await tx.outbox.count();
-            await tx.history.has([ts(1)]);
             await tx.latest([cell()]);
+            await tx.deleted([obj("obj-1")]);
             await tx.meta.set("cursor", String(current + 1));
           });
 

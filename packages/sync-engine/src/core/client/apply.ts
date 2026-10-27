@@ -8,9 +8,9 @@ const uniqueBy = <T>(items: T[], key: (item: T) => string): T[] => [
 ];
 
 /**
- * Merges remote deltas into `tx`: applies winning values to rows, records new deltas in history,
- * and advances the clock via `receive`. `receive` runs before any write, so a drift error leaves
- * `tx` untouched.
+ * Merges remote deltas into `tx`: applies winning values to rows, records the deltas that took
+ * effect in history, and advances the clock via `receive`. `receive` runs before any write, so a
+ * drift error leaves `tx` untouched.
  */
 export const applyRemoteDeltas = async (
   tx: StorageTx,
@@ -28,13 +28,9 @@ export const applyRemoteDeltas = async (
   );
   const objects = uniqueBy(deltas, objectKey);
 
-  const [knownTimestamps, latest, deleted] = await Promise.all([
-    tx.history.has(deltas.map((delta) => delta.timestamp)),
-    tx.latest(cells),
-    tx.deleted(objects),
-  ]);
+  const [latest, deleted] = await Promise.all([tx.latest(cells), tx.deleted(objects)]);
 
-  const plan = planMerge({ incoming: deltas, latest, deleted, knownTimestamps });
+  const plan = planMerge({ incoming: deltas, latest, deleted });
 
   if (plan.maxTimestamp !== null) {
     receive(plan.maxTimestamp);

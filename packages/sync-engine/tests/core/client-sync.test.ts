@@ -3,10 +3,11 @@ import { clientMemoryStorage } from "#adapters/client-memory";
 import { serverMemoryDatabase } from "#adapters/server-memory";
 import { memoryTransport } from "#adapters/transport-memory";
 import { type SyncClientOptions, type SyncNowError } from "#core/client/client";
-import type { Delta } from "#core/delta";
+import { deltaKey, type Delta } from "#core/delta";
 import { ConfigError, NodeClaimedError, TransportError } from "#core/errors";
 import { LocalClockAheadError } from "#core/hlc/clock";
 import { compareTimestamps, HLCTimestamp } from "#core/hlc/timestamp";
+import { objectKey } from "#core/object";
 import type { PullResult } from "#core/server/server";
 import type { Transport } from "#core/server/transport";
 import type { StorageAdapter } from "#core/storage";
@@ -111,8 +112,18 @@ const cursor = (storage: StorageAdapter) => read(storage, (tx) => tx.meta.get("c
 
 const storedClock = (storage: StorageAdapter) => read(storage, (tx) => tx.meta.get("clock"));
 
+// Timestamps of `deltas` that history (or the outbox) still records as newest or deleted
 const inHistory = (storage: StorageAdapter, deltas: Delta[]) =>
-  read(storage, (tx) => tx.history.has(timestamps(deltas)));
+  read(storage, async (tx) => {
+    const latest = await tx.latest(deltas.filter((delta) => delta.kind === "set"));
+    const deleted = await tx.deleted(deltas);
+    const recorded = deltas.filter((delta) =>
+      delta.kind === "set"
+        ? latest.get(deltaKey(delta)) === delta.timestamp
+        : deleted.has(objectKey(delta)),
+    );
+    return new Set(timestamps(recorded));
+  });
 
 const outbox = (storage: StorageAdapter) => read(storage, (tx) => tx.outbox.list());
 
@@ -317,7 +328,7 @@ describe("syncNow pulling", () => {
       const recorded = await inHistory(storage, [late]);
 
       expect(deleted).toBeUndefined();
-      expect(recorded.size).toBe(1);
+      expect(recorded.size).toBe(0);
     });
 
     it("ignores remote edits that arrive after a remote delete", async () => {
@@ -672,20 +683,6 @@ describe("syncNow pulling", () => {
 
       expect(validRow).toBeUndefined();
       expect(savedCursor).toBeUndefined();
-    });
-
-    it("stores only the known fields of a pulled delta", async () => {
-      const pulled = set(START - 1, "obj-1", "title", "hello");
-      const { client, storage } = await setup({
-        transport: scriptedTransport([
-          { deltas: [{ ...pulled, extra: "junk" }], cursor: "1", hasMore: false },
-        ]),
-      });
-
-      await client.syncNow();
-      const recorded = [...storage.state.history.values()];
-
-      expect(recorded).toEqual([pulled]);
     });
   });
 });

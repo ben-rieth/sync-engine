@@ -32,23 +32,22 @@ export type StorageTx = {
     /** Oldest timestamp first. */
     list(limit?: number): Promise<Delta[]>;
     count(): Promise<number>;
-    /** Called after a successful push. Timestamps not in the outbox are ignored. */
+    /** After a successful push, records these deltas as `history.add` does. Timestamps not in the outbox are ignored. */
     moveToHistory(timestamps: string[]): Promise<void>;
     /** Drops these outbox deltas without moving them to history. Timestamps not in the outbox are ignored. */
     delete(timestamps: string[]): Promise<void>;
   };
 
-  /** Every delta this device has applied or pushed, for last-writer-wins and deduplication. */
+  /** The newest `set` timestamp per cell, and every deleted object, that this device has applied or pushed. */
   history: {
-    /** Idempotent: deltas whose timestamp is already in history are skipped, not overwritten. */
+    /** Any order, idempotent. Older sets, and sets for objects deleted in history, are dropped. */
     add(deltas: Delta[]): Promise<void>;
-    /** Returns the subset of `timestamps` already in history. */
-    has(timestamps: string[]): Promise<Set<string>>;
   };
 
   /**
    * Newest `set` timestamp per cell across history and the outbox, keyed by `deltaKey`. Cells
-   * with no deltas are omitted. The outbox stops older remote deltas overwriting unpushed edits.
+   * with no deltas are omitted, as are history sets for objects deleted in history. The outbox
+   * stops older remote deltas overwriting unpushed edits.
    */
   latest(cells: CellRef[]): Promise<Map<DeltaKey, string>>;
 

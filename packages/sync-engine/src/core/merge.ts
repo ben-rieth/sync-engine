@@ -9,16 +9,15 @@ type RowWrite =
 type MergeInput = {
   // Any order; may include already-known deltas
   incoming: Delta[];
-  // Newest local timestamp per cell, over all history, not just winning writes
+  // Newest local timestamp per cell; with `deleted`, drops re-delivered deltas
   latest: Map<DeltaKey, string>;
-  // Deletes are final: later deltas for these are recorded in history but never applied
+  // Deletes are final: later deltas for these are never applied
   deleted: Set<ObjectKey>;
-  // Every local history timestamp. Dedup is by timestamp alone
-  knownTimestamps: Set<string>;
 };
 
 type MergePlan = {
   writes: RowWrite[];
+  // Only deltas that took effect: losing sets and repeat deletes change nothing in history
   historyAdds: Delta[];
   maxTimestamp: string | null;
 };
@@ -31,20 +30,12 @@ export const planMerge = (input: MergeInput): MergePlan => {
 
   const cellLatest = new Map(input.latest);
 
-  const seen = new Set(input.knownTimestamps);
   const deletedObjects = new Set(input.deleted);
 
   let maxTimestamp: string | null = null;
 
   for (const delta of sorted) {
     maxTimestamp = delta.timestamp;
-
-    if (seen.has(delta.timestamp)) {
-      continue;
-    }
-
-    seen.add(delta.timestamp);
-    historyAdds.push(delta);
 
     const object = objectKey(delta);
 
@@ -54,6 +45,7 @@ export const planMerge = (input: MergeInput): MergePlan => {
 
     if (delta.kind === "delete") {
       deletedObjects.add(object);
+      historyAdds.push(delta);
       writes.set(object, { kind: "delete", table: delta.table, objectId: delta.objectId });
       continue;
     }
@@ -66,6 +58,7 @@ export const planMerge = (input: MergeInput): MergePlan => {
     }
 
     cellLatest.set(cell, delta.timestamp);
+    historyAdds.push(delta);
 
     let write = writes.get(object);
     if (!write) {
