@@ -4,6 +4,7 @@ import {
   CorruptStorageError,
   NodeClaimedError,
   RowError,
+  type SyncError,
   TransportError,
   type UnexpectedError,
 } from "../errors";
@@ -51,7 +52,6 @@ export type InsertOptions = {
 
 type WriteError = CorruptStorageError | UnexpectedError;
 
-export type CreateError = CorruptStorageError | UnexpectedError;
 export type InsertError = RowError<"row-exists" | "row-deleted" | "no-columns"> | WriteError;
 export type UpdateError = RowError<"row-not-found"> | WriteError;
 export type DeleteError = WriteError;
@@ -65,8 +65,6 @@ export type SyncNowError =
 
 /** Methods return failures as `{ error }` and reject only with `ConfigError`. */
 export type SyncClient = {
-  /** Changes when the server says another device owns it; see `syncNow`. */
-  readonly nodeId: string;
   /**
    * Creates a row and records one delta per column. `id` and `undefined` values are ignored;
    * use `null` to store an empty value. Returns the row's id.
@@ -179,10 +177,11 @@ type ResolvedOptions = SyncClientOptions & {
   pushBatchSize: number;
 };
 
-/** Throws `ConfigError` for invalid options; returns other failures, like storage not opening. */
-export const createSyncClient = async (
-  options: SyncClientOptions,
-): Promise<Result<SyncClient, CreateError>> => {
+/**
+ * Throws `ConfigError` for invalid options. Storage opens on the first call, which returns any
+ * failure to open; the next call tries again.
+ */
+export const createSyncClient = (options: SyncClientOptions): SyncClient => {
   const pullLimit = options.pullLimit ?? 1000;
   if (!Number.isSafeInteger(pullLimit) || pullLimit < 1) {
     throw new ConfigError(`Invalid pullLimit: ${pullLimit}`);
@@ -198,9 +197,42 @@ export const createSyncClient = async (
   const generateId = options.generateId ?? requireRandomUUID();
   const generateNodeId = options.generateNodeId ?? requireRandomUUID();
 
-  return toResult(() =>
-    openClient({ ...options, generateId, generateNodeId, pullLimit, pushBatchSize }),
-  );
+  const resolved = { ...options, generateId, generateNodeId, pullLimit, pushBatchSize };
+
+  let opened: Promise<Result<SyncClient, WriteError>> | undefined;
+  const openOnce = async () => {
+    try {
+      const attempt = await toResult<SyncClient, WriteError>(() => openClient(resolved));
+      if (attempt.error) {
+        opened = undefined;
+      }
+      return attempt;
+    } catch (error) {
+      opened = undefined;
+      throw error;
+    }
+  };
+  const open = () => {
+    opened ??= openOnce();
+    return opened;
+  };
+
+  const withClient = async <T, E extends SyncError>(
+    call: (client: SyncClient) => Promise<Result<T, E>>,
+  ): Promise<Result<T, E | WriteError>> => {
+    const client = await open();
+    if (client.error) {
+      return client;
+    }
+    return call(client.result);
+  };
+
+  return {
+    insert: (...args) => withClient((client) => client.insert(...args)),
+    update: (...args) => withClient((client) => client.update(...args)),
+    delete: (...args) => withClient((client) => client.delete(...args)),
+    syncNow: () => withClient((client) => client.syncNow()),
+  };
 };
 
 const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
@@ -457,9 +489,6 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
   };
 
   return {
-    get nodeId() {
-      return clock.nodeId;
-    },
     insert: (table, values, insertOptions) =>
       toResult(() =>
         write(async ({ tx, tick }) => {

@@ -231,7 +231,7 @@ describe("httpTransport", () => {
 
     it("reaches syncNow as a server-protocol error, not a transport error", async () => {
       const { transport } = setup(() => reply(200, "<html>"));
-      const client = await openClient({ storage: clientMemoryStorage(), transport });
+      const client = openClient({ storage: clientMemoryStorage(), transport });
 
       const error = await failed(client.raw.syncNow(), "server-protocol");
 
@@ -240,7 +240,7 @@ describe("httpTransport", () => {
 
     it("reaches syncNow as a transport error caused by the HttpError", async () => {
       const { transport } = setup(() => reply(503));
-      const client = await openClient({ storage: clientMemoryStorage(), transport });
+      const client = openClient({ storage: clientMemoryStorage(), transport });
 
       const error = await failed(client.raw.syncNow(), "transport");
 

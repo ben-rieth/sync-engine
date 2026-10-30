@@ -11,7 +11,15 @@ import { objectKey } from "#core/object";
 import type { PullResult } from "#core/server/server";
 import type { Transport } from "#core/server/transport";
 import type { StorageAdapter } from "#core/storage";
-import { failed, failedBecause, openClient, read, serverDeltas, timestamps } from "../helpers";
+import {
+  failed,
+  failedBecause,
+  openClient,
+  read,
+  serverDeltas,
+  storedNodeId,
+  timestamps,
+} from "../helpers";
 
 const TABLE = "items";
 const START = 1_700_000_000_000;
@@ -78,7 +86,7 @@ const scriptedTransport = (pages: PullResult[]): Transport => ({
 });
 
 // One local client ("node-a") on a memory server; `remote` pushes deltas as another device would.
-const setup = async (overrides: Partial<SyncClientOptions> = {}) => {
+const setup = (overrides: Partial<SyncClientOptions> = {}) => {
   const storage = clientMemoryStorage();
   const server = serverMemoryDatabase();
   const spy = spyTransport(memoryTransport(server, USER));
@@ -90,7 +98,7 @@ const setup = async (overrides: Partial<SyncClientOptions> = {}) => {
     transport: spy.transport,
     ...overrides,
   };
-  const client = await openClient(options);
+  const client = openClient(options);
 
   return {
     client,
@@ -126,8 +134,6 @@ const inHistory = (storage: StorageAdapter, deltas: Delta[]) =>
   });
 
 const outbox = (storage: StorageAdapter) => read(storage, (tx) => tx.outbox.list());
-
-const storedNodeId = (storage: StorageAdapter) => read(storage, (tx) => tx.meta.get("nodeId"));
 
 const nodeOf = (delta: Delta) => HLCTimestamp.parse(delta.timestamp).nodeId;
 
@@ -172,13 +178,13 @@ const settle = () =>
 
 describe("syncNow pulling", () => {
   it("throws without a transport", async () => {
-    const { client } = await setup({ transport: undefined });
+    const { client } = setup({ transport: undefined });
 
     await expect(client.raw.syncNow()).rejects.toThrow(ConfigError);
   });
 
   it("does nothing when the server is empty", async () => {
-    const { client, storage } = await setup();
+    const { client, storage } = setup();
 
     await client.syncNow();
     const savedCursor = await cursor(storage);
@@ -188,13 +194,27 @@ describe("syncNow pulling", () => {
     expect(clock).toBeUndefined();
   });
 
-  it.each([0, -1, 1.5, Number.NaN])("rejects an invalid pullLimit of %s", async (pullLimit) => {
-    await expect(setup({ pullLimit })).rejects.toThrow(ConfigError);
+  it("creates the node id on a first sync and pulls with it", async () => {
+    const { client, storage, remote } = setup();
+    await remote(set(1, "obj-1", "title", "own", "node-a"), set(2, "obj-2", "title", "other"));
+
+    await client.syncNow();
+    const saved = await storedNodeId(storage);
+    const own = await row(storage, "obj-1");
+    const other = await row(storage, "obj-2");
+
+    expect(saved).toBe("node-a");
+    expect(own).toBeUndefined();
+    expect(other).toEqual({ id: "obj-2", title: "other" });
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])("rejects an invalid pullLimit of %s", (pullLimit) => {
+    expect(() => setup({ pullLimit })).toThrow(ConfigError);
   });
 
   describe("applying", () => {
     it("creates rows from another device's deltas and records them in history", async () => {
-      const { client, storage, remote } = await setup();
+      const { client, storage, remote } = setup();
       const deltas = [
         set(START - 2, "obj-1", "title", "hello"),
         set(START - 1, "obj-1", "done", false),
@@ -212,7 +232,7 @@ describe("syncNow pulling", () => {
     });
 
     it("applies the newest value when one page holds several deltas for a cell", async () => {
-      const { client, storage, remote } = await setup();
+      const { client, storage, remote } = setup();
       await remote(
         set(START - 1, "obj-1", "title", "newest"),
         set(START - 3, "obj-1", "title", "oldest"),
@@ -245,7 +265,7 @@ describe("syncNow pulling", () => {
             }),
           ),
       };
-      const { client, remote } = await setup({ storage: recording });
+      const { client, remote } = setup({ storage: recording });
       await remote(
         set(START - 4, "obj-1", "title", "old"),
         set(START - 3, "obj-1", "title", "new"),
@@ -262,7 +282,7 @@ describe("syncNow pulling", () => {
     });
 
     it("updates only the columns in the remote deltas", async () => {
-      const { client, storage, remote } = await setup();
+      const { client, storage, remote } = setup();
       const id = await client.insert(TABLE, { title: "local", notes: "keep" }, { id: "obj-1" });
       await remote(set(START + 1, id, "title", "remote"));
 
@@ -273,7 +293,7 @@ describe("syncNow pulling", () => {
     });
 
     it("removes a row deleted on another device", async () => {
-      const { client, storage, remote } = await setup();
+      const { client, storage, remote } = setup();
       const id = await client.insert(TABLE, { title: "local" }, { id: "obj-1" });
       await remote(del(START + 1, id));
 
@@ -284,7 +304,7 @@ describe("syncNow pulling", () => {
     });
 
     it("lets a remote delete win over a newer pending local edit", async () => {
-      const { client, storage, remote } = await setup();
+      const { client, storage, remote } = setup();
       const id = await client.insert(TABLE, { title: "local" }, { id: "obj-1" });
       await remote(del(START - 1, id));
 
@@ -295,7 +315,7 @@ describe("syncNow pulling", () => {
     });
 
     it("keeps a pending local edit over an older remote one", async () => {
-      const { client, storage, remote } = await setup();
+      const { client, storage, remote } = setup();
       const id = await client.insert(TABLE, { title: "local" }, { id: "obj-1" });
       await remote(set(START - 1, id, "title", "older remote"));
 
@@ -306,7 +326,7 @@ describe("syncNow pulling", () => {
     });
 
     it("lets a newer remote edit replace a pending local one", async () => {
-      const { client, storage, remote } = await setup();
+      const { client, storage, remote } = setup();
       const id = await client.insert(TABLE, { title: "local" }, { id: "obj-1" });
       await remote(set(START + 1, id, "title", "newer remote"));
 
@@ -317,7 +337,7 @@ describe("syncNow pulling", () => {
     });
 
     it("does not bring back a row deleted locally but not yet pushed", async () => {
-      const { client, storage, remote } = await setup();
+      const { client, storage, remote } = setup();
       const id = await client.insert(TABLE, { title: "local" }, { id: "obj-1" });
       await client.delete(TABLE, id);
       const late = set(START + 10, id, "title", "remote edit");
@@ -332,7 +352,7 @@ describe("syncNow pulling", () => {
     });
 
     it("ignores remote edits that arrive after a remote delete", async () => {
-      const { client, storage, remote } = await setup();
+      const { client, storage, remote } = setup();
       await remote(set(START - 3, "obj-1", "title", "created"), del(START - 2, "obj-1"));
       await client.syncNow();
 
@@ -345,7 +365,7 @@ describe("syncNow pulling", () => {
 
     it("merges a repeated page without overwriting later edits", async () => {
       const first = set(START - 2, "obj-1", "title", "first");
-      const { client, storage } = await setup({
+      const { client, storage } = setup({
         transport: scriptedTransport([
           { deltas: [first], cursor: "1", hasMore: false },
           { deltas: [first], cursor: "2", hasMore: false },
@@ -365,7 +385,7 @@ describe("syncNow pulling", () => {
 
   describe("cursor", () => {
     it("saves the cursor so the next sync only fetches new deltas", async () => {
-      const { client, storage, server, spy, remote } = await setup();
+      const { client, storage, server, spy, remote } = setup();
       await remote(set(START - 1, "obj-1", "title", "hello"));
 
       await client.syncNow();
@@ -382,7 +402,7 @@ describe("syncNow pulling", () => {
     });
 
     it("keeps pulling pages until the server has no more", async () => {
-      const { client, storage, spy, remote } = await setup({ pullLimit: 2 });
+      const { client, storage, spy, remote } = setup({ pullLimit: 2 });
       const deltas: Delta[] = [];
       for (let i = 1; i <= 5; i++) {
         deltas.push(set(START - 10 + i, `obj-${i}`, "title", `row ${i}`));
@@ -408,7 +428,7 @@ describe("syncNow pulling", () => {
         },
         push: async () => {},
       };
-      const { client } = await setup({ transport, pullLimit: 25 });
+      const { client } = setup({ transport, pullLimit: 25 });
 
       await client.syncNow();
       await client.syncNow();
@@ -420,7 +440,7 @@ describe("syncNow pulling", () => {
     });
 
     it("leaves the cursor unchanged when the server returns a null cursor", async () => {
-      const { client, storage } = await setup({
+      const { client, storage } = setup({
         transport: scriptedTransport([{ deltas: [], cursor: null, hasMore: false }]),
       });
 
@@ -436,7 +456,7 @@ describe("syncNow pulling", () => {
     ])("rejects hasMore with %s instead of looping, and writes nothing", async (_name, next) => {
       const first = set(START - 1, "obj-1", "title", "hello");
       const stuck = set(START - 2, "obj-2", "title", "stuck");
-      const { client, storage } = await setup({
+      const { client, storage } = setup({
         transport: scriptedTransport([
           { deltas: [first], cursor: "1", hasMore: false },
           { deltas: [stuck], cursor: next, hasMore: true },
@@ -455,12 +475,12 @@ describe("syncNow pulling", () => {
     });
 
     it("skips a page if another client on the same storage moved the cursor first", async () => {
-      const { client, storage, server, spy, remote, options } = await setup();
+      const { client, storage, server, spy, remote, options } = setup();
       await remote(
         set(START - 2, "obj-1", "title", "hello"),
         set(START - 1, "obj-2", "title", "world"),
       );
-      const other = await openClient({
+      const other = openClient({
         ...options,
         transport: memoryTransport(server, USER),
       });
@@ -481,12 +501,12 @@ describe("syncNow pulling", () => {
     });
 
     it("never moves the cursor back when another client pulled past this page mid-fetch", async () => {
-      const { client, storage, server, spy, remote, options } = await setup({ pullLimit: 1 });
+      const { client, storage, server, spy, remote, options } = setup({ pullLimit: 1 });
       await remote(
         set(START - 2, "obj-1", "title", "hello"),
         set(START - 1, "obj-2", "title", "world"),
       );
-      const other = await openClient({
+      const other = openClient({
         ...options,
         transport: memoryTransport(server, USER),
       });
@@ -522,7 +542,7 @@ describe("syncNow pulling", () => {
             }),
           ),
       };
-      const { client, spy, remote } = await setup({ storage: recording, pullLimit: 1 });
+      const { client, spy, remote } = setup({ storage: recording, pullLimit: 1 });
       counter = spy;
       await remote(
         set(START - 2, "obj-1", "title", "hello"),
@@ -539,7 +559,7 @@ describe("syncNow pulling", () => {
 
   describe("clock", () => {
     it("moves the clock past remote timestamps so later local writes are newer", async () => {
-      const { client, storage, remote } = await setup();
+      const { client, storage, remote } = setup();
       const ahead = set(START + 60_000, "obj-1", "title", "from the future");
       await remote(ahead);
 
@@ -553,7 +573,7 @@ describe("syncNow pulling", () => {
     });
 
     it("saves the clock after pulling", async () => {
-      const { client, storage, remote } = await setup();
+      const { client, storage, remote } = setup();
       await remote(set(START + 5, "obj-1", "title", "hello"));
 
       await client.syncNow();
@@ -565,7 +585,7 @@ describe("syncNow pulling", () => {
     });
 
     it("rejects a page with a timestamp too far ahead and changes nothing", async () => {
-      const { client, storage, remote } = await setup({ maxDriftMs: 1000 });
+      const { client, storage, remote } = setup({ maxDriftMs: 1000 });
       const drifted = set(START + 5000, "obj-1", "title", "too far ahead");
       await remote(drifted);
 
@@ -582,7 +602,7 @@ describe("syncNow pulling", () => {
     });
 
     it("applies the drifted page once local time catches up", async () => {
-      const { client, storage, remote, setTime } = await setup({ maxDriftMs: 1000 });
+      const { client, storage, remote, setTime } = setup({ maxDriftMs: 1000 });
       await remote(set(START + 5000, "obj-1", "title", "too far ahead"));
       await failed(client.raw.syncNow(), "remote-ahead");
 
@@ -594,7 +614,7 @@ describe("syncNow pulling", () => {
     });
 
     it("keeps pages merged before the failing one", async () => {
-      const { client, storage, remote } = await setup({ maxDriftMs: 1000, pullLimit: 1 });
+      const { client, storage, remote } = setup({ maxDriftMs: 1000, pullLimit: 1 });
       await remote(
         set(START - 1, "obj-1", "title", "fine"),
         set(START + 5000, "obj-2", "title", "drifted"),
@@ -616,7 +636,7 @@ describe("syncNow pulling", () => {
       const storage = clientMemoryStorage();
       const transport = memoryTransport(serverMemoryDatabase(), USER);
       transport.online = false;
-      const client = await openClient({ storage, transport, generateNodeId: () => "node-a" });
+      const client = openClient({ storage, transport, generateNodeId: () => "node-a" });
 
       await failedBecause(client.raw.syncNow(), "transport", "memoryTransport is offline");
       const savedCursor = await cursor(storage);
@@ -626,7 +646,7 @@ describe("syncNow pulling", () => {
 
     it("keeps pages merged before a transport error", async () => {
       const fine = set(START - 1, "obj-1", "title", "fine");
-      const { client, storage } = await setup({
+      const { client, storage } = setup({
         // the second pull throws, as the script has run out
         transport: scriptedTransport([{ deltas: [fine], cursor: "1", hasMore: true }]),
       });
@@ -641,7 +661,7 @@ describe("syncNow pulling", () => {
 
     it("throws the save error when the next page's fetch fails too", async () => {
       const drifted = set(START + 5000, "obj-1", "title", "drifted");
-      const { client, storage } = await setup({
+      const { client, storage } = setup({
         maxDriftMs: 1000,
         // the early second pull throws, as the script has run out
         transport: scriptedTransport([{ deltas: [drifted], cursor: "1", hasMore: true }]),
@@ -656,7 +676,7 @@ describe("syncNow pulling", () => {
     it("rejects a page containing an invalid timestamp and changes nothing", async () => {
       const valid = set(START - 1, "obj-1", "title", "fine");
       const invalid: Delta = { ...set(START - 1, "obj-2", "title", "bad"), timestamp: "garbage" };
-      const { client, storage } = await setup({
+      const { client, storage } = setup({
         transport: scriptedTransport([{ deltas: [valid, invalid], cursor: "2", hasMore: false }]),
       });
 
@@ -671,7 +691,7 @@ describe("syncNow pulling", () => {
     it("rejects a page containing a delta it cannot read and changes nothing", async () => {
       const valid = set(START - 1, "obj-1", "title", "fine");
       const unreadable = { timestamp: ts(START - 1, "node-c"), payload: "ciphertext" };
-      const { client, storage } = await setup({
+      const { client, storage } = setup({
         transport: scriptedTransport([
           { deltas: [valid, unreadable], cursor: "2", hasMore: false },
         ]),
@@ -688,15 +708,12 @@ describe("syncNow pulling", () => {
 });
 
 describe("syncNow pushing", () => {
-  it.each([0, -1, 1.5, Number.NaN])(
-    "rejects an invalid pushBatchSize of %s",
-    async (pushBatchSize) => {
-      await expect(setup({ pushBatchSize })).rejects.toThrow(ConfigError);
-    },
-  );
+  it.each([0, -1, 1.5, Number.NaN])("rejects an invalid pushBatchSize of %s", (pushBatchSize) => {
+    expect(() => setup({ pushBatchSize })).toThrow(ConfigError);
+  });
 
   it("sends the outbox to the server and moves it to history", async () => {
-    const { client, storage, server, spy } = await setup();
+    const { client, storage, server, spy } = setup();
     await client.insert(TABLE, { title: "hello", done: false }, { id: "obj-1" });
     const pending = await outbox(storage);
 
@@ -713,7 +730,7 @@ describe("syncNow pushing", () => {
   });
 
   it("pushes deletes", async () => {
-    const { client, server } = await setup();
+    const { client, server } = setup();
     await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
     await client.syncNow();
     await client.delete(TABLE, "obj-1");
@@ -726,7 +743,7 @@ describe("syncNow pushing", () => {
   });
 
   it("does not push when the outbox is empty", async () => {
-    const { client, spy } = await setup();
+    const { client, spy } = setup();
 
     await client.syncNow();
 
@@ -734,9 +751,9 @@ describe("syncNow pushing", () => {
   });
 
   it("delivers a row to another device", async () => {
-    const { client, server, options } = await setup();
+    const { client, server, options } = setup();
     const otherStorage = clientMemoryStorage();
-    const other = await openClient({
+    const other = openClient({
       ...options,
       storage: otherStorage,
       generateNodeId: () => "node-b",
@@ -752,7 +769,7 @@ describe("syncNow pushing", () => {
   });
 
   it("pushes in batches, oldest first", async () => {
-    const { client, storage, spy } = await setup({ pushBatchSize: 2 });
+    const { client, storage, spy } = setup({ pushBatchSize: 2 });
     await client.insert(TABLE, { a: 1, b: 2, c: 3, d: 4, e: 5 }, { id: "obj-1" });
     const pending = await outbox(storage);
 
@@ -765,7 +782,7 @@ describe("syncNow pushing", () => {
   });
 
   it("keeps pushed deltas counting for last-writer-wins", async () => {
-    const { client, storage, remote } = await setup();
+    const { client, storage, remote } = setup();
     await client.insert(TABLE, { title: "local" }, { id: "obj-1" });
     await client.syncNow();
     await remote(set(START - 1, "obj-1", "title", "older remote"));
@@ -777,7 +794,7 @@ describe("syncNow pushing", () => {
   });
 
   it("leaves the outbox unchanged when the push fails, and sends it on the next sync", async () => {
-    const { client, storage, server, spy } = await setup();
+    const { client, storage, server, spy } = setup();
     await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
     const pending = await outbox(storage);
     spy.beforePush = async () => {
@@ -800,7 +817,7 @@ describe("syncNow pushing", () => {
   });
 
   it("pushes again after a lost reply without duplicating on the server", async () => {
-    const { client, storage, server, spy } = await setup();
+    const { client, storage, server, spy } = setup();
     await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
     const pending = await outbox(storage);
     spy.afterPush = async () => {
@@ -822,7 +839,7 @@ describe("syncNow pushing", () => {
   });
 
   it("sends writes made during a push in the same sync", async () => {
-    const { client, storage, server, spy } = await setup();
+    const { client, storage, server, spy } = setup();
     await client.insert(TABLE, { title: "before" }, { id: "obj-1" });
     spy.beforePush = async () => {
       spy.beforePush = undefined;
@@ -840,7 +857,7 @@ describe("syncNow pushing", () => {
   });
 
   it("does not push if the pull fails", async () => {
-    const { client, storage, spy, remote } = await setup({ maxDriftMs: 1000 });
+    const { client, storage, spy, remote } = setup({ maxDriftMs: 1000 });
     await client.insert(TABLE, { title: "local" }, { id: "obj-1" });
     await remote(set(START + 5000, "obj-2", "title", "drifted"));
 
@@ -852,7 +869,7 @@ describe("syncNow pushing", () => {
   });
 
   it("reports a device clock ahead of the server", async () => {
-    const { client, storage, spy } = await setup();
+    const { client, storage, spy } = setup();
     await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
     const pending = await outbox(storage);
     const refusal = new LocalClockAheadError(3000);
@@ -875,7 +892,7 @@ describe("syncNow pushing", () => {
       },
       push: async () => {},
     };
-    const client = await openClient({
+    const client = openClient({
       storage: clientMemoryStorage(),
       transport,
       generateNodeId: () => "node-a",
@@ -893,7 +910,7 @@ describe("syncNow pushing", () => {
         throw new Error("sync push failure");
       },
     };
-    const client = await openClient({
+    const client = openClient({
       storage: clientMemoryStorage(),
       transport,
       generateNodeId: () => "node-a",
@@ -913,7 +930,7 @@ describe("syncNow pushing", () => {
         throw refusal;
       },
     };
-    const client = await openClient({
+    const client = openClient({
       storage: clientMemoryStorage(),
       transport,
       generateNodeId: () => "node-a",
@@ -934,7 +951,7 @@ describe("syncNow pushing", () => {
 
 describe("syncNow when another device owns the node id", () => {
   it("moves the outbox to a fresh node id, keeping each delta's time, and pushes it", async () => {
-    const { client, storage, server, spy } = await setupRotating("node-c");
+    const { client, storage, server, spy } = setupRotating("node-c");
     await client.insert(TABLE, { title: "hello", done: false }, { id: "obj-1" });
     const pending = await outbox(storage);
     refusePushesFrom(spy, "node-a");
@@ -948,11 +965,10 @@ describe("syncNow when another device owns the node id", () => {
     expect(onServer).toEqual(pending.map((delta) => onNode(delta, "node-c")));
     expect(remaining).toEqual([]);
     expect(saved).toBe("node-c");
-    expect(client.nodeId).toBe("node-c");
   });
 
   it("stamps later writes with the new node id, after the moved ones", async () => {
-    const { client, storage, spy } = await setupRotating("node-c");
+    const { client, storage, spy } = setupRotating("node-c");
     await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
     const before = await outbox(storage);
     refusePushesFrom(spy, "node-a");
@@ -969,7 +985,7 @@ describe("syncNow when another device owns the node id", () => {
   });
 
   it("returns NodeClaimedError and keeps the outbox when the fresh node id is refused too", async () => {
-    const { client, storage, spy } = await setupRotating("node-c", "node-d");
+    const { client, storage, spy } = setupRotating("node-c", "node-d");
     await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
     const pending = await outbox(storage);
     refusePushesFrom(spy, "node-a", "node-c");
@@ -983,7 +999,7 @@ describe("syncNow when another device owns the node id", () => {
   });
 
   it("throws and changes nothing when the fresh node id is invalid", async () => {
-    const { client, storage, spy } = await setupRotating("not valid");
+    const { client, storage, spy } = setupRotating("not valid");
     await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
     const pending = await outbox(storage);
     refusePushesFrom(spy, "node-a");
@@ -995,11 +1011,10 @@ describe("syncNow when another device owns the node id", () => {
 
     expect(remaining).toEqual(pending);
     expect(saved).toBe("node-a");
-    expect(client.nodeId).toBe("node-a");
   });
 
   it("merges the deltas it pushed under the old node id as no-ops on the next sync", async () => {
-    const { client, storage, server, spy } = await setup({
+    const { client, storage, server, spy } = setup({
       generateNodeId: nodeIdSequence("node-a", "node-c"),
       pushBatchSize: 1,
     });
@@ -1038,20 +1053,22 @@ describe("syncNow when another device owns the node id", () => {
   });
 
   it("keeps the node id when a push fails for another reason", async () => {
-    const { client, spy } = await setupRotating("node-c");
+    const { client, storage, spy } = setupRotating("node-c");
     await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
     spy.beforePush = async () => {
       throw new Error("offline");
     };
 
     await failed(client.raw.syncNow(), "transport");
+    const saved = await storedNodeId(storage);
 
-    expect(client.nodeId).toBe("node-a");
+    expect(saved).toBe("node-a");
   });
 
   it("moves another client on the same storage onto the new node id", async () => {
-    const { client, storage, spy, options } = await setupRotating("node-c");
-    const other = await openClient(options);
+    const { client, storage, spy, options } = setupRotating("node-c");
+    const other = openClient(options);
+    await other.insert(TABLE, { title: "early" }, { id: "obj-0" });
     await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
     refusePushesFrom(spy, "node-a");
     await client.syncNow();
@@ -1060,13 +1077,12 @@ describe("syncNow when another device owns the node id", () => {
     const pending = await outbox(storage);
 
     expect(pending.map(nodeOf)).toEqual(["node-c"]);
-    expect(other.nodeId).toBe("node-c");
   });
 
   it("rotates once when two clients on the same storage are refused", async () => {
-    const { client, storage, server, spy, options } = await setupRotating("node-c");
+    const { client, storage, server, spy, options } = setupRotating("node-c");
     const otherSpy = spyTransport(memoryTransport(server, USER));
-    const other = await openClient({ ...options, transport: otherSpy.transport });
+    const other = openClient({ ...options, transport: otherSpy.transport });
     await client.insert(TABLE, { title: "hello" }, { id: "obj-1" });
     refusePushesFrom(spy, "node-a");
     // `client` rotates while `other`'s push as node-a is on its way to being refused
@@ -1082,14 +1098,13 @@ describe("syncNow when another device owns the node id", () => {
     const onServer = await serverDeltas(server);
 
     expect(saved).toBe("node-c");
-    expect(other.nodeId).toBe("node-c");
     expect(onServer).toHaveLength(1);
   });
 });
 
 describe("syncNow while syncing", () => {
   it("waits for the running sync to finish before starting another", async () => {
-    const { client, spy } = await setup();
+    const { client, spy } = setup();
     const calls: Promise<void>[] = [];
     let pullsDuringFirst = 0;
     spy.beforeReturn = async () => {
@@ -1107,7 +1122,7 @@ describe("syncNow while syncing", () => {
   });
 
   it("runs one follow-up sync for every call made during a sync", async () => {
-    const { client, spy } = await setup();
+    const { client, spy } = setup();
     const calls: Promise<void>[] = [];
     spy.beforeReturn = async () => {
       spy.beforeReturn = undefined;
@@ -1121,7 +1136,7 @@ describe("syncNow while syncing", () => {
   });
 
   it("pulls changes that reached the server mid-sync before a later call resolves", async () => {
-    const { client, storage, spy, remote } = await setup();
+    const { client, storage, spy, remote } = setup();
     await client.insert(TABLE, { title: "local" }, { id: "obj-1" });
     const calls: Promise<void>[] = [];
     // The first sync has finished pulling by the time it pushes
@@ -1139,7 +1154,7 @@ describe("syncNow while syncing", () => {
   });
 
   it("runs a call made during a failed sync, and reports each result separately", async () => {
-    const { client, spy } = await setup();
+    const { client, spy } = setup();
     const calls: ReturnType<typeof client.raw.syncNow>[] = [];
     spy.beforeReturn = async () => {
       spy.beforeReturn = undefined;
@@ -1155,7 +1170,7 @@ describe("syncNow while syncing", () => {
   });
 
   it("starts a new sync for a call made after the follow-up finished", async () => {
-    const { client, spy } = await setup();
+    const { client, spy } = setup();
     const calls: Promise<void>[] = [];
     spy.beforeReturn = async () => {
       spy.beforeReturn = undefined;

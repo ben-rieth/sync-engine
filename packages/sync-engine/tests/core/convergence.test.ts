@@ -79,7 +79,7 @@ const network = async <const N extends string>(
       },
     };
     const storage = clientMemoryStorage();
-    const client = await openClient({
+    const client = openClient({
       storage,
       transport,
       generateNodeId: () => `node-${name}`,

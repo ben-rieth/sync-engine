@@ -11,7 +11,6 @@ export {
 
 export {
   createSyncClient,
-  type CreateError,
   type DeleteError,
   type InsertError,
   type InsertOptions,

@@ -5,7 +5,7 @@ import type { Delta } from "#core/delta";
 import { ConfigError, UnexpectedError } from "#core/errors";
 import { HLCTimestamp } from "#core/hlc/timestamp";
 import type { StorageAdapter } from "#core/storage";
-import { failed, failedBecause, ok, openClient, read, timestamps } from "../helpers";
+import { failed, failedBecause, ok, openClient, read, storedNodeId, timestamps } from "../helpers";
 
 const TABLE = "items";
 const START = 1_700_000_000_000;
@@ -31,9 +31,7 @@ const setup = (overrides: Partial<SyncClientOptions> = {}) => {
   return {
     storage,
     options,
-    create: async (extra: Partial<SyncClientOptions> = {}) => {
-      return openClient({ ...options, ...extra });
-    },
+    create: (extra: Partial<SyncClientOptions> = {}) => openClient({ ...options, ...extra }),
     setTime: (value: number) => {
       time = value;
     },
@@ -47,6 +45,10 @@ const row = (storage: StorageAdapter, objectId: string, table = TABLE) =>
   read(storage, (tx) => tx.rows.get(table, objectId));
 
 const storedClock = (storage: StorageAdapter) => read(storage, (tx) => tx.meta.get("clock"));
+
+const nodesOf = (deltas: Delta[]) => [
+  ...new Set(deltas.map((delta) => HLCTimestamp.parse(delta.timestamp).nodeId)),
+];
 
 const columns = (deltas: Delta[]) =>
   deltas.map((delta) => (delta.kind === "set" ? delta.column : "<delete>"));
@@ -88,92 +90,145 @@ const failing = (
 
 describe("createSyncClient", () => {
   describe("node id", () => {
-    it("generates and saves a node id on first start", async () => {
+    it("touches no storage until first used", async () => {
       const { storage, create } = setup();
 
-      const client = await create();
+      create();
 
-      const savedNodeId = await read(storage, (tx) => tx.meta.get("nodeId"));
-      expect(client.nodeId).toBe("node-a");
+      const savedNodeId = await storedNodeId(storage);
+      expect(savedNodeId).toBeUndefined();
+    });
+
+    it("generates and saves a node id on first use", async () => {
+      const { storage, create } = setup();
+      const client = create();
+
+      await client.insert(TABLE, { name: "milk" });
+
+      const savedNodeId = await storedNodeId(storage);
+      const deltas = await outbox(storage);
       expect(savedNodeId).toBe("node-a");
+      expect(nodesOf(deltas)).toEqual(["node-a"]);
     });
 
     it("reuses the saved node id on later starts", async () => {
-      const { create } = setup();
-      await create();
+      const { storage, create } = setup();
+      await create().insert(TABLE, { name: "milk" });
+      const restarted = create({ generateNodeId: () => "node-b" });
 
-      const restarted = await create({ generateNodeId: () => "node-b" });
+      await restarted.insert(TABLE, { name: "eggs" });
 
-      expect(restarted.nodeId).toBe("node-a");
+      const deltas = await outbox(storage);
+      expect(nodesOf(deltas)).toEqual(["node-a"]);
     });
 
     it("agrees on one node id when two clients start at the same time", async () => {
-      const { create } = setup();
+      const { storage, create } = setup();
       const ids = sequentialIds("node");
+      const first = create({ generateNodeId: ids });
+      const second = create({ generateNodeId: ids });
 
-      const [first, second] = await Promise.all([
-        create({ generateNodeId: ids }),
-        create({ generateNodeId: ids }),
+      await Promise.all([
+        first.insert(TABLE, { name: "milk" }),
+        second.insert(TABLE, { name: "eggs" }),
       ]);
 
-      expect(first.nodeId).toBe(second.nodeId);
+      const deltas = await outbox(storage);
+      expect(nodesOf(deltas)).toEqual(["node-1"]);
     });
 
     it("rejects an invalid generated node id and saves nothing", async () => {
       const { storage, create } = setup({ generateNodeId: () => "not valid!" });
+      const client = create();
 
-      await expect(create()).rejects.toThrow(ConfigError);
-      const savedNodeId = await read(storage, (tx) => tx.meta.get("nodeId"));
+      await expect(client.raw.insert(TABLE, { name: "milk" })).rejects.toThrow(ConfigError);
+
+      const savedNodeId = await storedNodeId(storage);
       expect(savedNodeId).toBeUndefined();
     });
 
-    it("uses crypto.randomUUID by default", async () => {
-      const client = await ok(createSyncClient({ storage: clientMemoryStorage() }));
+    it("keeps the node id when the first call fails", async () => {
+      const { storage, create } = setup();
+      const client = create();
+      await failed(client.raw.update(TABLE, "missing", { name: "milk" }), "row-not-found");
 
-      expect(client.nodeId).toMatch(/^[0-9a-f-]{36}$/);
+      await client.insert(TABLE, { name: "eggs" });
+
+      const savedNodeId = await storedNodeId(storage);
+      const deltas = await outbox(storage);
+      expect(savedNodeId).toBe("node-a");
+      expect(nodesOf(deltas)).toEqual(["node-a"]);
+    });
+
+    it("uses crypto.randomUUID by default", async () => {
+      const storage = clientMemoryStorage();
+      const client = createSyncClient({ storage });
+
+      await ok(client.insert(TABLE, { name: "milk" }));
+
+      const savedNodeId = await storedNodeId(storage);
+      expect(savedNodeId).toMatch(/^[0-9a-f-]{36}$/);
     });
   });
 
   describe("failures", () => {
-    it.each([-1, Number.NaN])("throws for an invalid maxDriftMs of %s", async (maxDriftMs) => {
+    it.each([-1, Number.NaN])("throws for an invalid maxDriftMs of %s", (maxDriftMs) => {
       const { create } = setup({ maxDriftMs });
 
-      await expect(create()).rejects.toThrow(ConfigError);
+      expect(() => create()).toThrow(ConfigError);
     });
 
-    it("throws at start when the default id generator cannot run", async () => {
+    it("throws at start when the default id generator cannot run", () => {
       vi.stubGlobal("crypto", undefined);
       try {
-        const created = createSyncClient({
-          storage: clientMemoryStorage(),
-          generateNodeId: () => "node-a",
-        });
-
-        await expect(created).rejects.toThrow(ConfigError);
+        expect(() =>
+          createSyncClient({ storage: clientMemoryStorage(), generateNodeId: () => "node-a" }),
+        ).toThrow(ConfigError);
       } finally {
         vi.unstubAllGlobals();
       }
     });
 
-    it("returns a storage failure instead of throwing", async () => {
+    it("returns a storage failure from the first call instead of throwing", async () => {
       const broken: StorageAdapter = {
         transaction: async () => {
           throw new Error("storage unavailable");
         },
       };
+      const client = createSyncClient({ storage: broken, generateNodeId: () => "node-a" });
 
-      const created = createSyncClient({ storage: broken, generateNodeId: () => "node-a" });
+      const inserted = client.insert(TABLE, { name: "milk" });
 
-      const error = await failedBecause(created, "unexpected", "storage unavailable");
-
+      const error = await failedBecause(inserted, "unexpected", "storage unavailable");
       expect(error).toBeInstanceOf(UnexpectedError);
+    });
+
+    it("opens storage again on the next call after a failure", async () => {
+      const storage = clientMemoryStorage();
+      let down = true;
+      const flaky: StorageAdapter = {
+        transaction: async (mode, fn) => {
+          if (down) {
+            throw new Error("storage unavailable");
+          }
+          return storage.transaction(mode, fn);
+        },
+      };
+      const client = createSyncClient({ storage: flaky, generateNodeId: () => "node-a" });
+      await failed(client.insert(TABLE, { name: "milk" }), "unexpected");
+      down = false;
+
+      const id = await ok(client.insert(TABLE, { name: "milk" }));
+
+      const saved = await row(storage, id);
+      expect(saved).toMatchObject({ name: "milk" });
     });
   });
 
   describe("insert", () => {
     it("returns the id as a result", async () => {
       const { create } = setup();
-      const client = await create();
+      const client = create();
 
       const inserted = await client.raw.insert(TABLE, { name: "milk" });
       const { result, error } = inserted;
@@ -186,7 +241,7 @@ describe("createSyncClient", () => {
 
     it("creates the row and returns its generated id", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
 
       const id = await client.insert(TABLE, { name: "milk", price: 3 });
 
@@ -197,7 +252,7 @@ describe("createSyncClient", () => {
 
     it("records one set delta per column", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
 
       const id = await client.insert(TABLE, { name: "milk", price: 3 });
 
@@ -223,7 +278,7 @@ describe("createSyncClient", () => {
 
     it("ignores id and undefined values but keeps null", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
 
       const id = await client.insert(TABLE, {
         id: "ignored",
@@ -241,7 +296,7 @@ describe("createSyncClient", () => {
 
     it("stores nested JSON values", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
 
       const id = await client.insert(TABLE, { tags: ["a", "b"], meta: { color: "red" } });
 
@@ -251,7 +306,7 @@ describe("createSyncClient", () => {
 
     it("uses a custom id when given", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
 
       const id = await client.insert(TABLE, { value: "USD" }, { id: "currency" });
 
@@ -262,7 +317,7 @@ describe("createSyncClient", () => {
 
     it("allows the same id in two tables", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
 
       await client.insert("a", { name: "first" }, { id: "shared" });
       await client.insert("b", { name: "second" }, { id: "shared" });
@@ -275,7 +330,7 @@ describe("createSyncClient", () => {
 
     it("fails when the id belongs to an existing row", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       await client.insert(TABLE, { name: "milk" }, { id: "x" });
 
       const error = await failed(
@@ -291,7 +346,7 @@ describe("createSyncClient", () => {
 
     it("fails when the id belongs to a deleted row", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       await client.insert(TABLE, { name: "milk" }, { id: "x" });
       await client.delete(TABLE, "x");
 
@@ -315,7 +370,7 @@ describe("createSyncClient", () => {
             }),
           ),
       };
-      const client = await create({ storage: counting });
+      const client = create({ storage: counting });
 
       await client.insert(TABLE, { name: "milk" });
       expect(deletedCalls).toBe(0);
@@ -326,7 +381,7 @@ describe("createSyncClient", () => {
 
     it("fails for a row with no columns", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
 
       await failed(client.raw.insert(TABLE, {}), "no-columns");
       await failed(client.raw.insert(TABLE, { id: "x", note: undefined }), "no-columns");
@@ -340,7 +395,7 @@ describe("createSyncClient", () => {
   describe("column names", () => {
     it("stores a __proto__ column as an own property", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
 
       const id = await client.insert(TABLE, JSON.parse('{"__proto__": "x", "a": 1}'));
 
@@ -353,7 +408,7 @@ describe("createSyncClient", () => {
 
     it("updates a __proto__ column the row did not have", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { a: 1 });
 
       await client.update(TABLE, id, JSON.parse('{"__proto__": {}}'));
@@ -368,7 +423,7 @@ describe("createSyncClient", () => {
   describe("update", () => {
     it("records deltas only for columns that changed", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { name: "milk", price: 3 });
 
       await client.update(TABLE, id, { name: "milk", price: 4 });
@@ -382,7 +437,7 @@ describe("createSyncClient", () => {
 
     it("treats equal nested values as unchanged", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { tags: ["a"], meta: { color: "red" } });
 
       await client.update(TABLE, id, { tags: ["a"], meta: { color: "red" } });
@@ -393,7 +448,7 @@ describe("createSyncClient", () => {
 
     it("keeps columns that are not in the patch", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { name: "milk", price: 3 });
 
       await client.update(TABLE, id, { price: 4 });
@@ -404,7 +459,7 @@ describe("createSyncClient", () => {
 
     it("adds a column that the row did not have", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { name: "milk" });
 
       await client.update(TABLE, id, { note: "fresh" });
@@ -417,7 +472,7 @@ describe("createSyncClient", () => {
 
     it("ignores id and undefined values but clears with null", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { name: "milk", note: "fresh" });
 
       await client.update(TABLE, id, { id: "other", name: undefined, note: null });
@@ -430,7 +485,7 @@ describe("createSyncClient", () => {
 
     it("does nothing when no column changed", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { name: "milk" });
       const clockBefore = await storedClock(storage);
 
@@ -445,7 +500,7 @@ describe("createSyncClient", () => {
 
     it("fails when the row does not exist", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
 
       await failed(client.raw.update(TABLE, "missing", { name: "milk" }), "row-not-found");
       const stored = await row(storage, "missing");
@@ -456,7 +511,7 @@ describe("createSyncClient", () => {
 
     it("fails for a deleted row and does not recreate it", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { name: "milk" });
       await client.delete(TABLE, id);
 
@@ -467,8 +522,8 @@ describe("createSyncClient", () => {
 
     it("fails when another client deleted the row first", async () => {
       const { storage, create } = setup();
-      const first = await create();
-      const second = await create();
+      const first = create();
+      const second = create();
       const id = await first.insert(TABLE, { name: "milk" });
 
       await second.delete(TABLE, id);
@@ -482,7 +537,7 @@ describe("createSyncClient", () => {
   describe("delete", () => {
     it("removes the row and records a delete delta", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { name: "milk" });
 
       await client.delete(TABLE, id);
@@ -498,7 +553,7 @@ describe("createSyncClient", () => {
 
     it("records only one delete when called twice", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { name: "milk" });
 
       await client.delete(TABLE, id);
@@ -510,7 +565,7 @@ describe("createSyncClient", () => {
 
     it("does nothing for a row that does not exist", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
 
       await client.delete(TABLE, "missing");
 
@@ -522,7 +577,7 @@ describe("createSyncClient", () => {
 
     it("only deletes the row in the given table", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       await client.insert("a", { name: "first" }, { id: "shared" });
       await client.insert("b", { name: "second" }, { id: "shared" });
 
@@ -538,7 +593,7 @@ describe("createSyncClient", () => {
   describe("clock", () => {
     it("stamps deltas with this node's id and the wall clock", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
 
       await client.insert(TABLE, { name: "milk" });
 
@@ -550,7 +605,7 @@ describe("createSyncClient", () => {
 
     it("saves the clock after every write", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
 
       const id = await client.insert(TABLE, { name: "milk" });
       const clockAfterInsert = await storedClock(storage);
@@ -570,12 +625,12 @@ describe("createSyncClient", () => {
 
     it("keeps increasing after a restart with the wall clock moved backwards", async () => {
       const { storage, create, setTime } = setup();
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { name: "milk" });
       await client.update(TABLE, id, { name: "bread" });
 
       setTime(START - 60_000);
-      const restarted = await create();
+      const restarted = create();
       await restarted.update(TABLE, id, { name: "eggs" });
       await restarted.delete(TABLE, id);
 
@@ -583,18 +638,19 @@ describe("createSyncClient", () => {
       expectUniqueAndIncreasing(timestamps(deltas));
     });
 
-    it("reports a corrupt stored nodeId when opening", async () => {
-      const { storage, options } = setup();
+    it("reports a corrupt stored nodeId on first use", async () => {
+      const { storage, create } = setup();
       await storage.transaction("readwrite", (tx) => tx.meta.set("nodeId", "not a valid id!"));
+      const client = create();
 
-      const error = await failed(createSyncClient(options), "corrupt-storage");
+      const error = await failed(client.raw.insert(TABLE, { name: "milk" }), "corrupt-storage");
 
       expect(error.message).toContain("not a valid id!");
     });
 
     it("rejects writes when the stored clock is corrupt", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       await storage.transaction("readwrite", (tx) => tx.meta.set("clock", "garbage"));
 
       await failed(client.raw.insert(TABLE, { name: "milk" }), "corrupt-storage");
@@ -608,8 +664,8 @@ describe("createSyncClient", () => {
     it("orders interleaved writes from two clients on the same storage", async () => {
       const { storage, create } = setup();
       // Separate prefixes so the clients never pick the same row id
-      const first = await create({ generateId: sequentialIds("a") });
-      const second = await create({ generateId: sequentialIds("b") });
+      const first = create({ generateId: sequentialIds("a") });
+      const second = create({ generateId: sequentialIds("b") });
 
       /* oxlint-disable no-await-in-loop -- each write must see the one before it */
       const issued: string[] = [];
@@ -626,8 +682,8 @@ describe("createSyncClient", () => {
 
     it("gives concurrent writes from two clients unique timestamps", async () => {
       const { storage, create } = setup();
-      const first = await create({ generateId: sequentialIds("a") });
-      const second = await create({ generateId: sequentialIds("b") });
+      const first = create({ generateId: sequentialIds("a") });
+      const second = create({ generateId: sequentialIds("b") });
 
       const writes: Promise<string>[] = [];
       for (let i = 0; i < 20; i++) {
@@ -647,11 +703,11 @@ describe("createSyncClient", () => {
       "rows, deltas, and clocks return to original state when %s fails",
       async (method) => {
         const { storage, create } = setup();
-        const client = await create();
+        const client = create();
         const id = await client.insert(TABLE, { name: "milk" });
         const clockBefore = await storedClock(storage);
 
-        const broken = await create({ storage: failing(storage, method) });
+        const broken = create({ storage: failing(storage, method) });
 
         await failedBecause(
           broken.raw.insert(TABLE, { name: "bread" }, { id: "y" }),
@@ -678,11 +734,11 @@ describe("createSyncClient", () => {
 
     it("rows, deltas, and clocks return to original state when rows.upsert fails", async () => {
       const { storage, create } = setup();
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { name: "milk" });
       const clockBefore = await storedClock(storage);
 
-      const broken = await create({ storage: failing(storage, "rows.upsert") });
+      const broken = create({ storage: failing(storage, "rows.upsert") });
 
       await failedBecause(
         broken.raw.insert(TABLE, { name: "bread" }, { id: "y" }),
@@ -707,14 +763,14 @@ describe("createSyncClient", () => {
 
     it("keeps working after a failed write", async () => {
       const { storage, create } = setup();
-      const broken = await create({ storage: failing(storage, "outbox.add") });
+      const broken = create({ storage: failing(storage, "outbox.add") });
       await failedBecause(
         broken.raw.insert(TABLE, { name: "bread" }),
         "unexpected",
         "outbox.add failed",
       );
 
-      const client = await create();
+      const client = create();
       const id = await client.insert(TABLE, { name: "milk" });
 
       const stored = await row(storage, id);
@@ -724,7 +780,7 @@ describe("createSyncClient", () => {
     it("keeps timestamps increasing on the same client after a failed write", async () => {
       const { storage, create } = setup();
       let fail = false;
-      const client = await create({ storage: failing(storage, "meta.set", () => fail) });
+      const client = create({ storage: failing(storage, "meta.set", () => fail) });
 
       await client.insert(TABLE, { name: "milk" });
       fail = true;

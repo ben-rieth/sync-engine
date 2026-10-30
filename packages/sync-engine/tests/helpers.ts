@@ -22,6 +22,9 @@ export const timestamps = (deltas: WireDelta[]): string[] => deltas.map((d) => d
 export const read = <T>(storage: StorageAdapter, fn: (tx: StorageTx) => Promise<T>): Promise<T> =>
   storage.transaction("read", fn);
 
+export const storedNodeId = (storage: StorageAdapter): Promise<string | undefined> =>
+  read(storage, (tx) => tx.meta.get("nodeId"));
+
 // Everything the server holds for `user`, as another device would see it
 export const serverDeltas = async (
   server: ServerDatabaseAdapter,
@@ -86,14 +89,11 @@ type Unwrap<F> = F extends (...args: infer A) => Promise<infer R>
   : never;
 
 export type UnwrappedClient = {
-  [K in Exclude<keyof SyncClient, "nodeId">]: Unwrap<SyncClient[K]>;
-} & { nodeId: string; raw: SyncClient };
+  [K in keyof SyncClient]: Unwrap<SyncClient[K]>;
+} & { raw: SyncClient };
 
 /** For arrange steps: a failing setup call fails the test. Use `raw` to assert on a Result. */
 export const unwrapped = (client: SyncClient): UnwrappedClient => ({
-  get nodeId() {
-    return client.nodeId;
-  },
   raw: client,
   insert: (...args) => ok(client.insert(...args)),
   update: (...args) => ok(client.update(...args)),
@@ -101,7 +101,5 @@ export const unwrapped = (client: SyncClient): UnwrappedClient => ({
   syncNow: () => ok(client.syncNow()),
 });
 
-export const openClient = async (options: SyncClientOptions): Promise<UnwrappedClient> => {
-  const client = await ok(createSyncClient(options));
-  return unwrapped(client);
-};
+export const openClient = (options: SyncClientOptions): UnwrappedClient =>
+  unwrapped(createSyncClient(options));
