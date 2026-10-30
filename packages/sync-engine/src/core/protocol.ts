@@ -1,7 +1,7 @@
 import type { WireDelta } from "./delta";
 import { isValidNodeId } from "./hlc/node-id";
 import { HLCTimestamp } from "./hlc/timestamp";
-import type { PullResult } from "./server/server";
+import { ServerProtocolError, type PullResult } from "./server/server";
 import { isRecord, quote } from "#utils/json";
 import { fail, ok, type Parsed } from "#utils/parsed";
 
@@ -124,6 +124,14 @@ export const parsePullResponse = (json: unknown): Parsed<PullResult> => {
     return parsed;
   }
   return ok({ deltas: parsed.value.deltas, cursor, hasMore });
+};
+
+export const requirePullResponse = (json: unknown): PullResult => {
+  const page = parsePullResponse(json);
+  if (!page.ok) {
+    throw new ServerProtocolError(`Server sent an invalid page: ${page.reason}`);
+  }
+  return page.value;
 };
 
 export const parseErrorBody = (json: unknown): ErrorBody | null => {

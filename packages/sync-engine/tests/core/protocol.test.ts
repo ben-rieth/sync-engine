@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { HLCTimestamp } from "#core/hlc/timestamp";
-import { parseErrorBody, parsePullQuery, parsePullResponse, parsePushBody } from "#core/protocol";
+import {
+  parseErrorBody,
+  parsePullQuery,
+  parsePullResponse,
+  parsePushBody,
+  requirePullResponse,
+} from "#core/protocol";
+import { ServerProtocolError } from "#core/server/server";
 import { delta } from "../helpers";
 
 const encrypted = {
@@ -153,6 +160,23 @@ describe("parsePullResponse", () => {
     const parsed = parsePullResponse(response);
 
     expect(parsed.ok).toBe(false);
+  });
+});
+
+describe("requirePullResponse", () => {
+  it("returns a valid page", () => {
+    const page = { deltas: [delta(1)], cursor: "1", hasMore: true };
+
+    const required = requirePullResponse(page);
+
+    expect(required).toEqual(page);
+  });
+
+  it("throws ServerProtocolError for an invalid page", () => {
+    const parse = () => requirePullResponse({ deltas: [], cursor: null, hasMore: true });
+
+    expect(parse).toThrow(ServerProtocolError);
+    expect(parse).toThrow("Server sent an invalid page: hasMore needs a cursor to continue from");
   });
 });
 

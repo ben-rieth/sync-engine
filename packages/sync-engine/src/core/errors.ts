@@ -1,3 +1,5 @@
+import type { ErrorBody, ProtocolErrorCode } from "./protocol";
+
 const messageOf = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);
 
@@ -63,6 +65,37 @@ export class UnexpectedError extends SyncError {
   constructor(cause: unknown) {
     super(`Unexpected error: ${messageOf(cause)}`, { cause });
     this.name = "UnexpectedError";
+  }
+}
+
+const isRetryableStatus = (status: number): boolean =>
+  status === 408 || status === 429 || status >= 500;
+
+/** `httpTransport` throws this; the client returns it as a `TransportError` cause. */
+export class HttpError extends SyncError {
+  readonly code = "http" as const;
+  /** `null` when no response arrived: a network error or timeout. */
+  readonly status: number | null;
+  readonly retryable: boolean;
+  readonly serverCode: ProtocolErrorCode | null;
+
+  private constructor(status: number | null, body: ErrorBody | null = null, cause?: unknown) {
+    const detail = body === null ? "" : `: ${body.message}`;
+    super(status === null ? `Request failed: ${messageOf(cause)}` : `HTTP ${status}${detail}`, {
+      cause,
+    });
+    this.name = "HttpError";
+    this.status = status;
+    this.retryable = status === null || isRetryableStatus(status);
+    this.serverCode = body?.code ?? null;
+  }
+
+  static network(cause: unknown): HttpError {
+    return new HttpError(null, null, cause);
+  }
+
+  static response(status: number, body: ErrorBody | null): HttpError {
+    return new HttpError(status, body);
   }
 }
 

@@ -24,6 +24,7 @@ export {
 export {
   ConfigError,
   CorruptStorageError,
+  HttpError,
   NodeClaimedError,
   RowError,
   SyncError,

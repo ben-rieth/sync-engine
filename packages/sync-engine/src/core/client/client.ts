@@ -15,7 +15,7 @@ import {
 } from "../hlc/clock";
 import { isValidNodeId } from "../hlc/node-id";
 import { HLCTimestamp } from "../hlc/timestamp";
-import { parsePullResponse } from "../protocol";
+import { requirePullResponse } from "../protocol";
 import { toResult, type Result } from "../result";
 import { ServerProtocolError, type PullResult } from "../server/server";
 import type { Transport } from "../server/transport";
@@ -151,13 +151,9 @@ const setDeltas = (
 
 // Any transport may relay a malformed server response
 const parsePage = (response: PullResult): PullResult<Delta> => {
-  const envelope = parsePullResponse(response);
-  if (!envelope.ok) {
-    throw new ServerProtocolError(`Server sent an invalid page: ${envelope.reason}`);
-  }
-
+  const envelope = requirePullResponse(response);
   const deltas: Delta[] = [];
-  for (const wire of envelope.value.deltas) {
+  for (const wire of envelope.deltas) {
     const delta = parseDelta(wire);
     if (!delta.ok) {
       throw new ServerProtocolError(`Server sent an invalid delta: ${delta.reason}`);
@@ -165,7 +161,7 @@ const parsePage = (response: PullResult): PullResult<Delta> => {
     deltas.push(delta.value);
   }
 
-  return { ...envelope.value, deltas };
+  return { ...envelope, deltas };
 };
 
 const readNodeId = async (tx: StorageTx): Promise<string | undefined> => {
@@ -309,7 +305,7 @@ const openClient = async (options: ResolvedOptions): Promise<SyncClient> => {
         limit: pullLimit,
       });
     } catch (error) {
-      throw new TransportError(error);
+      throw error instanceof ServerProtocolError ? error : new TransportError(error);
     }
     const page = parsePage(response);
     if (page.hasMore && page.cursor === from) {
